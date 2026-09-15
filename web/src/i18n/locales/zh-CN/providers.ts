@@ -1,0 +1,230 @@
+// 供应商渠道页文案:列表卡片、新增向导、OAuth 授权、模型探测/测活、额度展示、计费映射、模型勾选器
+const providers = {
+  // ---- 列表页 ----
+  title: '我的供应商',
+  addChannel: '+ 添加渠道',
+  empty: '还没有渠道。点击「+ 添加渠道」接入你的第一个供应商 ~',
+  disabledSection: '已禁用',
+  pendingAuth: '待授权',
+  continueAuth: '继续授权',
+  reauth: '重新授权',
+  deleteConfirm: '确定删除渠道「{{name}}」？凭据将一并删除。',
+  priorityBadge: '优先级 {{n}}',
+  proxyBadge: '🛡 代理',
+  proxyBadgeTitle: '上游请求走平台代理',
+  quotaBtn: '额度',
+  addBtn: '+ 添加',
+
+  // ---- 表单公共字段（向导 / 编辑弹窗复用）----
+  nameLabel: '展示名 *',
+  protocolLabel: '协议',
+  priorityLabel: '优先级（大者优先）',
+  proxyAccess: '通过平台代理访问',
+  proxyAdminNote: '代理地址由管理员统一配置',
+
+  // ---- 通用错误 / 状态 ----
+  errRateLimited: '额度查询已限频，请稍后再试',
+  errModelMapJson: 'model_map 必须是 JSON 对象，如 {"gpt-4o":"gpt-4o-2024-11-20"}',
+  errMapFormat: '模型映射 JSON 格式错误，请先修正后再操作',
+  fetching: '拉取中…',
+  fetchBtn: '↻ 拉取模型',
+  fetchFailed: '拉取失败',
+  requestingUpstream: '请求上游中…',
+  testing: '测试中…',
+  unknownError: '未知错误',
+
+  // ---- finish_reason 中文映射 ----
+  finish: {
+    stop: '正常结束',
+    length: '达上限截断',
+    toolCalls: '工具调用',
+    functionCall: '函数调用',
+    contentFilter: '内容过滤',
+  },
+
+  // ---- 线协议友好名（卡片副标题）----
+  protocol: {
+    openai: 'OpenAI 兼容',
+    anthropic: 'Anthropic 协议',
+    gemini: 'Gemini 协议',
+  },
+
+  // ---- 新增向导 ----
+  wizard: {
+    typeApiKeyDesc: 'GLM / DeepSeek / SiliconFlow / 火山Ark / 千帆 / 混元 / MiMo / MiniMax 或任意 OpenAI 兼容端点',
+    typeOauth: 'OAuth 订阅',
+    typeOauthDesc: 'Kimi / iFlow / Qoder / Trae / CodeBuddy / OpenAI Codex / Claude Pro 授权登录',
+    quickPick: '快速选择',
+    quickPickOauth: '（OAuth 订阅平台）',
+    quickPickApi: '（国内主流平台）',
+    namePhOauth: '我的 Kimi',
+    namePhApi: '我的 DeepSeek',
+    baseUrlLabel: 'Base URL *（OpenAI 兼容）',
+    getApiKey: '申请 API Key',
+    builtinModels: '内置模型：{{models}}',
+    modelsMore: ' 等 {{count}} 个',
+    apiKeyLabel: 'API Key *',
+    fetchHint: '填写 Base URL 和 API Key 后可从上游拉取模型列表',
+    prevStep: '← 上一步',
+    createAndAuth: '创建并开始授权 →',
+  },
+
+  // ---- OAuth 授权弹窗 ----
+  oauth: {
+    title: 'OAuth 授权',
+    step1Device: '1. 打开授权页面',
+    openHost: '打开 {{host}} ↗',
+    step2Device: '2. 输入授权码',
+    waiting: '等待授权确认…',
+    step1Browser: '1. 在新窗口完成授权登录',
+    openAuthPage: '打开授权页面 ↗',
+    step2PastePre: '2. 登录后浏览器会跳转到',
+    step2PastePost: '（页面打不开属预期），复制地址栏完整 URL 粘贴到这里',
+    submitting: '提交中…',
+    done: '完成授权',
+    step2Poll: '2. 授权完成后点击下方按钮',
+    iHaveAuthorized: '我已授权，继续',
+  },
+
+  // ---- 模型探测 / 测试弹窗 ----
+  models: {
+    title: '模型 · {{name}}',
+    subtitle: '从上游 GET /v1/models 拉取可用模型',
+    listCount: '共 {{count}} 个模型，点击选中后可测试可用性：',
+    clickToSelect: '点击选中',
+    noneReturned: '上游未返回任何模型。',
+    availLabel: '测试模型可用性（快速测活）',
+    availPlaceholder: 'gpt-4o-mini（可手输或从上方列表点选）',
+    quickTest: '快速测活',
+    minRequest: '向上游发送 max_tokens=1 的最小请求…',
+    availOk: '✅ {{model}} 可用（HTTP {{status}}，{{latency}}）',
+    availFail: '❌ {{model}} 不可用：{{error}}',
+    realLabel: '模拟真实请求（发送带提示词的实际调用）',
+    presetTitle: '提示词：{{prompt}}',
+    promptPlaceholder: '发送给模型的提示词（点选上方类型自动填充）',
+    nonstreamTest: '非流式测试',
+    streamTest: '流式测试',
+    stopTest: '停止',
+    streaming: '接收中…',
+    stopped: '已手动停止',
+    sendingRealStream: '正在向上游发送流式真实请求…',
+    sendingRealNonstream: '正在向上游发送非流式真实请求…',
+    ok: '✅ 成功',
+    fail: '❌ 失败',
+    stream: '流式',
+    nonstream: '非流式',
+    totalLatency: '总耗时',
+    firstToken: '首字',
+    finishReason: '结束原因',
+    promptTokens: '输入',
+    completionTokens: '输出',
+    promptLabel: '提示词',
+    thinking: '思考过程（{{count}} 字符）',
+    contentLabel: '输出内容',
+    historyLabel: '测活记录（点击行查看详情）',
+  },
+
+  // ---- 编辑弹窗 ----
+  edit: {
+    title: '编辑：{{name}}',
+    oauthLocked: '🔐 授权渠道不可更换平台；如需换用其他订阅，请删除后重新添加。',
+    apiKeyLabel: 'API Key（留空则不修改）',
+    enableChannel: '启用该渠道',
+  },
+
+  // ---- 额度展示（openai codex /wham/usage 快照）----
+  quota: {
+    // 窗口标签
+    winDefault: '窗口',
+    win5h: '5h 窗口',
+    winDaily: '今日',
+    winWeekly: '本周',
+    winMonthly: '本月',
+    winYearly: '本年',
+    // 重置倒计时 / 更新时间
+    resetNow: '即将重置',
+    resetInMinutes: '{{mins}} 分钟后重置',
+    resetInHours: '{{hours}} 小时后重置',
+    resetInDays: '{{days}} 天后重置',
+    justNow: '刚刚',
+    minutesAgo: '{{mins}} 分钟前',
+    hoursAgo: '{{hours}} 小时前',
+    daysAgo: '{{days}} 天前',
+    // 渠道卡片紧凑区块
+    cardTitle: '点击查看额度详情',
+    syncFailed: '额度同步失败：{{error}}',
+    noData: '暂无额度数据',
+    limitReached: '已限额',
+    resetCreditsTitle: '限速重置积分：消耗一次可立即清零当前限速窗口',
+    resetCredits: '⚡ 重置 ×{{n}}',
+    relaySuffix: ' · 转发观测',
+    // 详情弹窗
+    title: '额度 · {{name}}',
+    neverSynced: '尚未同步过额度快照。',
+    querying: '查询中…',
+    queryNow: '立即查询',
+    relaySource: '转发观测',
+    proactiveSource: '主动查询',
+    updatedAt: '{{ago}}更新',
+    lastSyncFailed: '最近一次同步失败：{{error}}（以下为上次成功数据）',
+    allowed: '允许请求',
+    resetCreditsAvail: '⚡ 可用重置 ×{{n}}',
+    creditsTitle: '按量 credits 余额',
+    credits: '💰 credits {{balance}}',
+    creditsUnlimited: '不限',
+    additionalLimits: '模型级附加限额',
+    remaining: '剩余约 {{n}}%',
+  },
+
+  // ---- 计费名映射编辑器 ----
+  billing: {
+    label: '计费名映射（可选 · 渠道私有别名 → 价格表标准名）',
+    descPre: '渠道上游模型名与价格表不一致时（如',
+    descMid: '实为',
+    descPost: '），在此映射后按标准名计费；映射只改名字不改价格。',
+    renameTitle: '删除后重新添加可改名',
+    pickPlaceholder: '选择价格表模型…',
+    deleteTitle: '删除该映射',
+    incomplete: '存在未选择标准模型的映射，保存前请补全或删除',
+    inputPlaceholder: '请求模型名，如 my-alias',
+    unpriced: '未命中价格表的模型：',
+    addAsMapping: '添加为计费映射',
+    noPrices: '价格表暂无条目（未定价模型不计费）—— 联系管理员在「模型定价」配置后即可映射。',
+  },
+
+  // ---- 模型勾选器 ----
+  picker: {
+    label: '启用模型（勾选后网关即对外提供）',
+    enabledCount: '{{n}} 个已启用',
+    fetchTitle: '从上游 GET /v1/models 拉取',
+    selectAll: '全选',
+    clear: '清空',
+    filterPlaceholder: '过滤模型…',
+    noMatch: '上游未返回匹配的模型。',
+    manualPlaceholder: '手动添加模型名（上游列表之外）',
+    advanced: '高级：重命名映射（JSON：平台名→上游名）',
+  },
+
+  // ---- 预设测活类型标签 ----
+  testPreset: {
+    chat: '闲聊',
+    knowledge: '知识',
+    math: '数学',
+    reason: '推理',
+    long: '长文',
+    code: '代码',
+    custom: '自定义',
+  },
+
+  // ---- 预设测活提示词（发给模型的测试载荷，随界面语言）----
+  testPrompt: {
+    chat: '你好，请用一句话介绍你自己。',
+    knowledge: '详细解释 TCP 三次握手和四次挥手的过程，包括每个阶段的状态变化。',
+    math: '求解方程：2x + 3y = 12，4x - y = 5。请给出 x 和 y 的值。',
+    reason: '有 12 个外观相同的球，其中 11 个重量相同，1 个重量不同。用天平最少称几次能找出那个坏球？请给出称量方案。',
+    long: '详细解释量子力学中的"薛定谔的猫"思想实验，包括其物理意义和对量子力学的贡献。',
+    code: '用 Python 实现快速排序算法，包含注释和简单示例。',
+  },
+}
+
+export default providers

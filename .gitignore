@@ -1,0 +1,12 @@
+bin/
+web/node_modules/
+# dist 由构建生成，仅保留占位文件保证 fresh clone 可编译（//go:embed all:dist）
+web/dist/*
+!web/dist/.gitkeep
+*.local
+.env
+.worktrees/
+.spec-workflow/
+backups/
+buildctx/
+*.tsbuildinfo

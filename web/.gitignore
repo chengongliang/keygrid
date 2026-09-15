@@ -1,0 +1,5 @@
+node_modules/
+# dist 由构建生成，仅保留占位文件（fresh clone 可编译）
+dist/*
+!dist/.gitkeep
+*.local

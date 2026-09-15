@@ -1,0 +1,169 @@
+# ============================================================================
+# 生产部署（Harbor 镜像直跑版）—— 不 build，不依赖本仓库任何本地文件
+#
+# 用法（部署机上只需本文件 + .env 两个文件）：
+#   1. docker login harbor.example.com（你的私有镜像仓库）
+#   2. 创建 .env（与本文件同目录），最小内容：
+#        MASTER_KEY=<32+位随机串>
+#        JWT_SECRET=<强随机串>
+#        POSTGRES_PASSWORD=<强密码>
+#        PUBLIC_BASE_URL=https://your-domain.com
+#      可选：APP_HOST_PORT(默认8090)、CORS_ALLOWED_ORIGINS、
+#            RATE_LIMIT_RPM / RATE_LIMIT_CONCURRENCY、OIDC_*、ADMIN_EMAIL
+#   3. 启动：
+#        docker compose -f docker-compose.harbor.yml up -d
+#   4. HTTPS 反代（可选，需 DOMAIN 公网解析到本机 80/443）：
+#        docker compose -f docker-compose.harbor.yml --profile tls up -d
+#   5. 升级到 Harbor 上的新 latest：
+#        docker compose -f docker-compose.harbor.yml pull app
+#        docker compose -f docker-compose.harbor.yml up -d
+#
+# 说明：${VAR} 插值由 docker compose 自动从同目录 .env 读取（无需 env_file）。
+#       app 端口只暴露 8080->8090；postgres/redis 端口不对外，仅 compose 内网。
+# ============================================================================
+
+services:
+  app:
+    image: harbor.example.com/your-org/keygrid:latest
+    environment:
+      LISTEN_ADDR: ":8080"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: keygrid
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required in .env}
+      DB_NAME: keygrid
+      # ---- 必填三件套：不设直接拒绝启动，避免生产悄悄用弱默认 ----
+      MASTER_KEY: ${MASTER_KEY:?MASTER_KEY required in .env}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET required in .env}
+      # OAuth 回调基址，必须与实际访问协议/域名一致
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?PUBLIC_BASE_URL required in .env}
+      # ---- 以下可选项均有安全默认 ----
+      REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
+      RATE_LIMIT_RPM: ${RATE_LIMIT_RPM:-0}
+      RATE_LIMIT_CONCURRENCY: ${RATE_LIMIT_CONCURRENCY:-0}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      # 经 Caddy/其他反代访问时设 1（信任 X-Forwarded-For）；不带反代直连时保持 0
+      TRUST_PROXY: ${TRUST_PROXY:-0}
+      # 生产硬约束：无视 .env，强制关闭内网 mock 放行
+      SSRF_ALLOW_INTERNAL: "0"
+      # OAuth 端点覆盖（自托管 fork 用，留空走官方端点）
+      KIMI_DEVICE_CODE_URL: ${KIMI_DEVICE_CODE_URL:-}
+      KIMI_TOKEN_URL: ${KIMI_TOKEN_URL:-}
+      KIMI_AUTHORIZE_DEVICE_URL: ${KIMI_AUTHORIZE_DEVICE_URL:-}
+      OAUTH_SCAN_INTERVAL: ${OAUTH_SCAN_INTERVAL:-60}
+      OAUTH_REFRESH_LEAD: ${OAUTH_REFRESH_LEAD:-300}
+      # 首个 admin 提升：启动时该邮箱的已注册用户自动置为 admin
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      # OIDC SSO（也可在管理后台热配置，env 仅作兜底）
+      OIDC_ENABLED: ${OIDC_ENABLED:-0}
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_SCOPES: ${OIDC_SCOPES:-openid email profile}
+    ports:
+      - "${APP_HOST_PORT:-8090}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # /healthz 健康检查已内置在镜像 HEALTHCHECK 中，compose 自动继承
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    # 不暴露宿主机端口，仅 compose 内网可达
+    expose:
+      - "5432"
+    environment:
+      POSTGRES_USER: keygrid
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required in .env}
+      POSTGRES_DB: keygrid
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keygrid"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+  # 可选 HTTPS 反代（--profile tls 启用）：Caddy 自动签发/续期 Let's Encrypt。
+  # Caddyfile 直接内联在下方 command，无需本地 deploy/ 目录。
+  caddy:
+    profiles: ["tls"]
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # 启用 tls 前必须在 .env 设置 DOMAIN（公网可解析到本机 80/443）
+      DOMAIN: ${DOMAIN:-}
+    command:
+      - sh
+      - -c
+      - |
+        cat > /etc/caddy/Caddyfile <<CADDYFILE
+        # DOMAIN 由 compose 在插值时直接烧入（宿主 .env 与 caddy 容器同源）
+        ${DOMAIN} {
+        	encode gzip
+        	reverse_proxy app:8080 {
+        		# SSE 流式响应：立即透传，不缓冲
+        		flush_interval -1
+        	}
+        	header {
+        		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        		X-Content-Type-Options "nosniff"
+        	}
+        }
+        CADDYFILE
+        exec caddy run --config /etc/caddy/Caddyfile
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

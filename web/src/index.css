@@ -1,0 +1,406 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  color-scheme: light;
+  --bg: #fafafa;
+  --panel: #ffffff;
+  --panel-solid: #ffffff;
+  --line: #e4e4e7;
+  --text: #18181b;
+  --muted: #71717a;
+  --input-bg: #ffffff;
+}
+.dark {
+  color-scheme: dark;
+  --bg: #09090b;
+  --panel: rgba(24, 24, 27, 0.6);
+  --panel-solid: #18181b;
+  --line: #27272a;
+  --text: #f4f4f5;
+  --muted: #a1a1aa;
+  --input-bg: #18181b;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  @apply antialiased;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans SC", sans-serif;
+}
+
+/* shadcn-ish 卡片 */
+.card {
+  @apply rounded-xl p-4;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+.btn {
+  /* 全站按钮统一尺寸 = 用量页自定义区间的「应用」按钮：h-6 / text-xs / px-2.5 / rounded-md */
+  @apply inline-flex h-6 items-center justify-center gap-1.5 rounded-md px-2.5 text-xs font-medium whitespace-nowrap transition
+    disabled:opacity-50 disabled:pointer-events-none;
+}
+.btn-primary {
+  /* Tailwind v4: @apply 只能引用工具类，这里展开 .btn 内容 */
+  @apply inline-flex h-6 items-center justify-center gap-1.5 rounded-md px-2.5 text-xs font-medium whitespace-nowrap transition
+    disabled:opacity-50 disabled:pointer-events-none;
+  /* 与侧边栏选中态同款：淡紫底 + 品牌紫文字 */
+  background: color-mix(in oklab, #7c3aed 12%, transparent);
+  border: 1px solid color-mix(in oklab, #7c3aed 35%, transparent);
+  color: #7c3aed;
+}
+.btn-primary:hover {
+  background: color-mix(in oklab, #7c3aed 18%, transparent);
+}
+.dark .btn-primary {
+  background: color-mix(in oklab, #a78bfa 16%, transparent);
+  border-color: color-mix(in oklab, #a78bfa 40%, transparent);
+  color: #a78bfa;
+}
+.dark .btn-primary:hover {
+  background: color-mix(in oklab, #a78bfa 24%, transparent);
+}
+.btn-ghost {
+  @apply inline-flex h-6 items-center justify-center gap-1.5 rounded-md px-2.5 text-xs font-medium whitespace-nowrap transition
+    disabled:opacity-50 disabled:pointer-events-none;
+  border: 1px solid var(--line);
+  color: var(--text);
+}
+.btn-ghost:hover {
+  background: color-mix(in oklab, var(--line) 35%, transparent);
+}
+/* 与 .input 等高的行内主按钮变体：用于「输入框 + 按钮」同行布局 ——
+   全站 .btn* 是 h-6 小药丸，挨着 text-sm 输入框会显矮不和谐；
+   不设固定高，在 flex 容器里随输入框拉伸等高。 */
+.btn-primary-lg {
+  @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3.5 text-sm font-medium whitespace-nowrap transition
+    disabled:opacity-50 disabled:pointer-events-none;
+  background: color-mix(in oklab, #7c3aed 12%, transparent);
+  border: 1px solid color-mix(in oklab, #7c3aed 35%, transparent);
+  color: #7c3aed;
+}
+.btn-primary-lg:hover {
+  background: color-mix(in oklab, #7c3aed 18%, transparent);
+}
+.dark .btn-primary-lg {
+  background: color-mix(in oklab, #a78bfa 16%, transparent);
+  border-color: color-mix(in oklab, #a78bfa 40%, transparent);
+  color: #a78bfa;
+}
+.dark .btn-primary-lg:hover {
+  background: color-mix(in oklab, #a78bfa 24%, transparent);
+}
+.btn-danger {
+  @apply inline-flex h-6 items-center justify-center gap-1.5 rounded-md px-2.5 text-xs font-medium whitespace-nowrap transition
+    disabled:opacity-50 disabled:pointer-events-none;
+  border: 1px solid color-mix(in oklab, #b91c1c 55%, transparent);
+  color: #ef4444;
+}
+.btn-danger:hover {
+  background: color-mix(in oklab, #b91c1c 14%, transparent);
+}
+/* 表格操作列的方形图标按钮：固定尺寸不换行，避免多个文字按钮折行撑高行；
+   语义用原生 title 提示 */
+.btn-icon {
+  @apply inline-flex h-6 w-6 items-center justify-center rounded-md transition
+    disabled:opacity-50 disabled:pointer-events-none;
+  border: 1px solid var(--line);
+  color: var(--text);
+}
+.btn-icon:hover {
+  background: color-mix(in oklab, var(--line) 35%, transparent);
+}
+.btn-icon-danger {
+  @apply inline-flex h-6 w-6 items-center justify-center rounded-md transition
+    disabled:opacity-50 disabled:pointer-events-none;
+  border: 1px solid color-mix(in oklab, #b91c1c 55%, transparent);
+  color: #ef4444;
+}
+.btn-icon-danger:hover {
+  background: color-mix(in oklab, #b91c1c 14%, transparent);
+}
+.input {
+  @apply w-full rounded-lg px-3 py-2 text-sm
+    placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-violet-600/40;
+  border: 1px solid var(--line);
+  background: var(--input-bg);
+  color: var(--text);
+}
+/* 紧凑输入框（与全站 h-6 按钮同高，如表格搜索框）。
+   属性全部内置，不依赖 HTML 上的 utilities 覆盖 —— .input 系列是未分层样式，
+   层叠上优先于 Tailwind utilities，外部 w-56/text-xs 等覆盖类不会生效 */
+.input-sm {
+  @apply inline-block h-6 rounded-md px-2 text-xs
+    placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-violet-600/40;
+  border: 1px solid var(--line);
+  background: var(--input-bg);
+  color: var(--text);
+}
+/* 与 .input 等高的行内次要按钮变体（灰色边框，用于显示/隐藏等辅助操作） */
+.btn-ghost-lg {
+  @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3.5 text-sm font-medium whitespace-nowrap transition
+    disabled:opacity-50 disabled:pointer-events-none;
+  border: 1px solid var(--line);
+  color: var(--text);
+}
+.btn-ghost-lg:hover {
+  background: color-mix(in oklab, var(--line) 35%, transparent);
+}
+.badge {
+  @apply inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium;
+}
+.badge-green {
+  @apply inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium;
+  color: #059669;
+  border: 1px solid color-mix(in oklab, #059669 40%, transparent);
+  background: color-mix(in oklab, #059669 10%, transparent);
+}
+.dark .badge-green { color: #34d399; }
+.badge-red {
+  @apply inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium;
+  color: #dc2626;
+  border: 1px solid color-mix(in oklab, #dc2626 40%, transparent);
+  background: color-mix(in oklab, #dc2626 10%, transparent);
+}
+.dark .badge-red { color: #f87171; }
+.badge-yellow {
+  @apply inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium;
+  color: #d97706;
+  border: 1px solid color-mix(in oklab, #d97706 40%, transparent);
+  background: color-mix(in oklab, #d97706 10%, transparent);
+}
+.dark .badge-yellow { color: #fbbf24; }
+.badge-blue {
+  @apply inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium;
+  color: #2563eb;
+  border: 1px solid color-mix(in oklab, #2563eb 40%, transparent);
+  background: color-mix(in oklab, #2563eb 10%, transparent);
+}
+.dark .badge-blue { color: #60a5fa; }
+.badge-zinc {
+  @apply inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium;
+  background: color-mix(in oklab, var(--muted) 15%, transparent);
+  color: var(--muted);
+  border: 1px solid var(--line);
+}
+/* 徽标内的数值/关键值：比 muted 标签更深更重，形成「标签 + 值」层级（测活元数据等） */
+.badge-zinc .badge-val {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-weight: 600;
+  color: var(--text);
+}
+.label {
+  @apply mb-1 block text-xs font-medium;
+  color: var(--muted);
+}
+/* 表格：语义化主题行 */
+.thead-row {
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+}
+.tbody-row {
+  border-bottom: 1px solid color-mix(in oklab, var(--line) 60%, transparent);
+}
+.tbody-row:hover {
+  background: color-mix(in oklab, var(--muted) 6%, transparent);
+}
+.tbody-row:last-child {
+  border-bottom: 0;
+}
+/* 表格操作列：sticky 固定右侧，横向滚动（如英文长文案撑宽表格）时操作按钮始终可见 */
+.sticky-col {
+  position: sticky;
+  right: 0;
+  /* 不透明底色：遮住滚过的下层单元格；浅色下 = card 背景，暗色下还原半透明 panel 叠在 body 上的视觉色 */
+  background: var(--panel-solid);
+  /* 左缘渐隐阴影，提示右侧列被固定 */
+  box-shadow: -12px 0 10px -12px color-mix(in oklab, var(--text) 30%, transparent);
+}
+.dark .sticky-col {
+  background: color-mix(in oklab, var(--panel-solid) 60%, var(--bg));
+}
+.tbody-row:hover .sticky-col {
+  background: color-mix(in oklab, var(--panel-solid) 94%, var(--muted));
+}
+.dark .tbody-row:hover .sticky-col {
+  background: color-mix(in oklab, color-mix(in oklab, var(--panel-solid) 60%, var(--bg)) 94%, var(--muted));
+}
+.text-muted {
+  color: var(--muted);
+}
+.text-soft {
+  color: var(--muted);
+  opacity: 0.75;
+}
+/* 浅色模式下的 emerald/amber 徽标与代码块底色 */
+.mono-well {
+  border: 1px solid var(--line);
+  background: color-mix(in oklab, var(--muted) 8%, var(--panel));
+}
+/* 弹窗遮罩与面板 */
+.modal-panel {
+  background: var(--panel-solid);
+}
+/* 进度条底轨 */
+.track {
+  background: color-mix(in oklab, var(--muted) 20%, transparent);
+}
+/* 错误/警告横条（浅深两套） */
+.err-well {
+  border: 1px solid color-mix(in oklab, #dc2626 45%, transparent);
+  background: color-mix(in oklab, #dc2626 8%, transparent);
+  /* 上游错误常含无空格长串（JSON/Request id），强制断行避免撑破弹窗 */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.warn-well {
+  border: 1px solid color-mix(in oklab, #d97706 45%, transparent);
+  background: color-mix(in oklab, #d97706 8%, transparent);
+}
+/* tab 选中态 */
+.tab-active {
+  background: color-mix(in oklab, var(--muted) 18%, transparent);
+  color: var(--text);
+}
+/* 侧边栏导航（dashboard 模板风格：当前项高亮） */
+.nav-item:hover:not(.nav-active) {
+  background: color-mix(in oklab, var(--muted) 10%, transparent);
+}
+/* 选中态：安静版 —— 淡紫底 + 品牌紫文字，无渐变；深色模式用亮紫保证对比度 */
+.nav-active {
+  background: color-mix(in oklab, #7c3aed 12%, transparent);
+  color: #7c3aed;
+  font-weight: 500;
+}
+.dark .nav-active {
+  background: color-mix(in oklab, #a78bfa 16%, transparent);
+  color: #a78bfa;
+}
+/* 侧边栏分组标题 */
+.nav-section-title {
+  @apply mb-2 px-3 text-xs font-semibold uppercase tracking-wider;
+  color: var(--muted);
+}
+/* Markdown 渲染（测活输出等 LLM 文本）：紧凑排版，基于 CSS 变量适配浅/深色 */
+.md-body {
+  overflow-wrap: anywhere; /* 长串（URL/无空格 JSON）不撑破容器 */
+}
+.md-body > :first-child {
+  margin-top: 0;
+}
+.md-body > :last-child {
+  margin-bottom: 0;
+}
+.md-body p {
+  margin: 0.4em 0;
+}
+.md-body h1,
+.md-body h2,
+.md-body h3,
+.md-body h4 {
+  font-weight: 600;
+  line-height: 1.4;
+  margin: 0.8em 0 0.3em;
+}
+.md-body h1 {
+  font-size: 1.15em;
+}
+.md-body h2 {
+  font-size: 1.08em;
+}
+.md-body h3,
+.md-body h4 {
+  font-size: 1em;
+}
+.md-body ul,
+.md-body ol {
+  margin: 0.4em 0;
+  padding-left: 1.4em;
+}
+.md-body ul {
+  list-style: disc;
+}
+.md-body ol {
+  list-style: decimal;
+}
+.md-body li {
+  margin: 0.15em 0;
+}
+.md-body li > ul,
+.md-body li > ol {
+  margin: 0.1em 0;
+}
+.md-body code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.92em;
+  background: color-mix(in oklab, var(--muted) 14%, transparent);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+.md-body pre {
+  margin: 0.5em 0;
+  padding: 0.6em 0.8em;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--muted) 8%, var(--panel));
+  overflow-x: auto;
+}
+.md-body pre code {
+  background: none;
+  padding: 0;
+  font-size: 1em;
+}
+.md-body blockquote {
+  margin: 0.5em 0;
+  padding: 0.1em 0.8em;
+  border-left: 3px solid color-mix(in oklab, #7c3aed 45%, transparent);
+  color: var(--muted);
+}
+.md-body table {
+  margin: 0.5em 0;
+  border-collapse: collapse;
+  /* 窄容器里长表格横向滚动，不撑破弹窗 */
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.md-body th,
+.md-body td {
+  border: 1px solid var(--line);
+  padding: 0.25em 0.6em;
+  text-align: left;
+}
+.md-body th {
+  font-weight: 600;
+  background: color-mix(in oklab, var(--muted) 10%, transparent);
+}
+.md-body hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 0.8em 0;
+}
+.md-body a {
+  color: #7c3aed;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.dark .md-body a {
+  color: #a78bfa;
+}
+.md-body img {
+  max-width: 100%;
+}
+
+/* 数据手动刷新反馈：内容区整体淡入一次，让“刷新生效”肉眼可见 */
+@keyframes data-refresh {
+  from {
+    opacity: 0.25;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.data-refresh {
+  animation: data-refresh 0.45s ease-out;
+}

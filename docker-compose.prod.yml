@@ -1,0 +1,69 @@
+# 生产部署覆盖文件（叠加在 docker-compose.yml 之上）
+# 需要 docker compose v2.24+（使用了 !override 标签收起 db/redis 端口）
+#
+# 首次部署：
+#   cp .env.example .env && vim .env   # 必改：MASTER_KEY、JWT_SECRET、
+#                                      # POSTGRES_PASSWORD、PUBLIC_BASE_URL
+# 启动（不带 HTTPS 反代，宿主机防火墙自行放行 8090）：
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+# 启动（带 Caddy 自动 HTTPS 反代，需 DOMAIN 可公网解析到本机 80/443）：
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile tls up -d --build
+# 备份 / 恢复：
+#   make backup / make restore FILE=backups/keygrid_YYYYMMDD_HHMMSS.sql.gz
+
+services:
+  app:
+    ports: !override
+      - "${APP_HOST_PORT:-8090}:8080"
+    environment:
+      # SSRF 内网放行：默认 0；自托管确需接入内网服务（如内网 new-api）时在 .env 设 1，
+      # 或用 SSRF_ALLOWED_HOSTS/CIDRS 细粒度放行。多租户/不可信用户可添加供应商时务必保持 0
+      SSRF_ALLOW_INTERNAL: ${SSRF_ALLOW_INTERNAL:-0}
+      # OAuth 回调域名必须与实际访问协议一致（Caddy/公司网关终止 TLS 时为 https）
+      # PUBLIC_BASE_URL: https://gw.company.com   ← 在 .env 里改
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # 收起内部组件的宿主机端口，仅 compose 内网可达
+  postgres:
+    ports: !override []
+    security_opt:
+      - no-new-privileges:true
+
+  redis:
+    ports: !override []
+    security_opt:
+      - no-new-privileges:true
+
+  # 可选 HTTPS 反代（--profile tls 启用）：Caddy 自动签发/续期 Let's Encrypt 证书
+  caddy:
+    profiles: ["tls"]
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # 启用 tls profile 前必须在 .env 设置 DOMAIN（公网可解析到本机 80/443）
+      DOMAIN: ${DOMAIN:-}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

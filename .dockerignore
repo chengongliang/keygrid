@@ -1,0 +1,17 @@
+# 加速构建 context + 防止密钥进入镜像层
+.git
+.gitignore
+.dockerignore
+bin/
+backups/
+buildctx/
+.env
+.env.example
+*.md
+.spec-workflow/
+.worktrees/
+
+# 前端：依赖与本地产物（dist 由 stage1 构建后注入，防 stale）
+web/node_modules/
+web/dist/
+web/tsconfig.tsbuildinfo

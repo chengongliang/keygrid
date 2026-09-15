@@ -1,0 +1,12 @@
+# e2e 专用覆盖：给 app 容器注入 host.docker.internal（mock IdP / mock 上游跑在宿主机）
+# 用法：
+#   docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d
+#
+# ⚠ host-gateway 依赖 daemon 的默认 bridge 网络。若 daemon 配置了 bridge:none
+#   （"unable to derive the IP value for host-gateway" 报错），可在 .env 设
+#   E2E_HOST_GATEWAY=<容器可达的宿主机 IP>（如 slirp 网关 10.0.2.2 或局域网 IP）；
+#   或去掉 daemon.json 的 "bridge": "none" 并重启 dockerd。
+services:
+  app:
+    extra_hosts:
+      - "host.docker.internal:${E2E_HOST_GATEWAY:-host-gateway}"

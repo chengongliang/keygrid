@@ -1,0 +1,125 @@
+services:
+  app:
+    build:
+      context: .
+      # 容器 bridge 出网异常时（如部分 rootless docker / WSL2 环境），在 .env 设
+      # DOCKER_BUILD_NETWORK=host 让构建走宿主机网络栈；默认值不影响其他环境
+      network: ${DOCKER_BUILD_NETWORK:-default}
+    # host.docker.internal 仅 e2e mock 需要（docker-compose.e2e.yml 注入）：
+    # 这里不配 extra_hosts，避免依赖默认 bridge（daemon bridge:none 时 host-gateway 无法推导）
+    environment:
+      LISTEN_ADDR: ":8080"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: keygrid
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-keygrid}
+      DB_NAME: keygrid
+      # JWT 密钥必填（示例默认值被 conf.Validate 拒绝启动）：openssl rand -hex 32
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET required in .env}
+      MASTER_KEY: ${MASTER_KEY:?MASTER_KEY required}
+      REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
+      RATE_LIMIT_RPM: ${RATE_LIMIT_RPM:-0}
+      RATE_LIMIT_CONCURRENCY: ${RATE_LIMIT_CONCURRENCY:-0}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://127.0.0.1:8090}
+      # CORS 白名单（逗号分隔；空 = 拒绝跨域；仅跨域调用 API 时需要配）
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      # 反向代理后设 1：信任 X-Forwarded-For，限速/IP 白名单按真实客户端 IP 计算；
+      # 端口直接暴露（含仅靠防火墙）时保持 0，否则客户端可伪造 IP 绕过限速与白名单
+      TRUST_PROXY: ${TRUST_PROXY:-0}
+      # SSRF 内网上游放行开关（自托管可选；生产需要接入内网服务时也可开）。
+      # =1 全部放行；细粒度用下方 SSRF_ALLOWED_HOSTS/CIDRS；多租户/不可信用户可添加供应商时勿开
+      SSRF_ALLOW_INTERNAL: ${SSRF_ALLOW_INTERNAL:-0}
+      # SSRF 内网上游白名单（SSRF_ALLOW_INTERNAL=0 时生效）：主机名（支持 .corp.lan / *.corp.lan
+      # 后缀通配）与 CIDR 可混用，逗号分隔
+      SSRF_ALLOWED_HOSTS: ${SSRF_ALLOWED_HOSTS:-}
+      SSRF_ALLOWED_CIDRS: ${SSRF_ALLOWED_CIDRS:-}
+      # e2e 专用：跳过登录限速（与 SSRF 开关无关，生产勿设 1）
+      E2E_MODE: ${E2E_MODE:-0}
+      # OAuth 端点覆盖（e2e/自托管 fork 用，留空走官方端点）
+      KIMI_DEVICE_CODE_URL: ${KIMI_DEVICE_CODE_URL:-}
+      KIMI_TOKEN_URL: ${KIMI_TOKEN_URL:-}
+      KIMI_AUTHORIZE_DEVICE_URL: ${KIMI_AUTHORIZE_DEVICE_URL:-}
+      OAUTH_SCAN_INTERVAL: ${OAUTH_SCAN_INTERVAL:-60}
+      OAUTH_REFRESH_LEAD: ${OAUTH_REFRESH_LEAD:-300}
+      # OIDC SSO（Keycloak 兼容任何标准 OIDC IdP）
+      OIDC_ENABLED: ${OIDC_ENABLED:-0}
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_SCOPES: ${OIDC_SCOPES:-openid email profile}
+    ports:
+      - "${APP_HOST_PORT:-8090}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # 健康检查内置在镜像 HEALTHCHECK（/healthz），compose 自动继承
+    logging: &default-logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+  # E2E: mock kimi OAuth server + mock OpenAI upstream（仅本地测试用；
+  # 需显式 --profile mock 才启动，生产 up 不会拉起）
+  mock-kimi:
+    profiles: ["mock"]
+    image: python:3.12-alpine
+    user: "${MockUID:-1000}:${MockGID:-1000}"
+    working_dir: /workspace
+    volumes:
+      - ./scripts:/workspace/scripts:ro
+    command: python3 scripts/mock_kimi_oauth.py
+    ports:
+      - "${MOCK_KIMI_HOST_PORT:-9901}:9901"
+    restart: unless-stopped
+
+  # 多协议 E2E: 三协议 echo 上游（openai/anthropic/responses，见 mock_upstream.py；
+  # 渠道 api_key 固定填 upstream-secret-key）
+  mock-upstream:
+    profiles: ["mock"]
+    image: python:3.12-alpine
+    user: "${MockUID:-1000}:${MockGID:-1000}"
+    working_dir: /workspace
+    volumes:
+      - ./scripts:/workspace/scripts:ro
+    command: python3 scripts/mock_upstream.py
+    ports:
+      - "${MOCK_UPSTREAM_HOST_PORT:-9999}:9999"
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5433:5432" # 宿主机 5432 常被其他项目占用，本地 go run 用 DB_PORT=5433
+    environment:
+      POSTGRES_USER: keygrid
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-keygrid}
+      POSTGRES_DB: keygrid
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keygrid"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging: *default-logging
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      # 暴露到宿主机供本地开发共用；已被占用时改 REDIS_HOST_PORT
+      - "${REDIS_HOST_PORT:-16379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging: *default-logging
+    restart: unless-stopped
+
+volumes:
+  pgdata:

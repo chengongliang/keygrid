@@ -1,0 +1,14 @@
+# Caddy 反向代理：自动 HTTPS（Let's Encrypt），DOMAIN 由 compose 注入
+{$DOMAIN} {
+	encode gzip
+
+	reverse_proxy app:8080 {
+		# SSE 流式响应：立即透传，不缓冲
+		flush_interval -1
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+	}
+}

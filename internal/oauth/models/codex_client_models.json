@@ -1,0 +1,13 @@
+{
+  "comment": "Codex 上游模型目录兜底快照（精简自 router-for-me/models 项目的 codex_client_models.json，运行时会远程自动刷新覆盖本文件内容）",
+  "models": [
+    "gpt-6-astra",
+    "gpt-reserve",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+    "gpt-5.3-codex-spark",
+    "codex-auto-review"
+  ]
+}
