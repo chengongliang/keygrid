@@ -65,6 +65,8 @@ export interface ApiKey {
   prefix: string
   ip_whitelist?: string // 逗号分隔 IP/CIDR，空 = 不限
   model_limit?: string // 逗号分隔模型名，空 = 不限
+  /** 逗号分隔渠道 ID 白名单，空 = 不限；非空时请求只路由到白名单内渠道 */
+  provider_limit?: string
   /** 额度上限 USD；0 = 不限（计费 P2 起硬拦截） */
   quota_limit?: number
   /** 累计已消耗 USD（系统异步增量维护） */

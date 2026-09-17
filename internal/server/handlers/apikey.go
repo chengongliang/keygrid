@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net"
 	"net/http"
 	"strconv"
@@ -27,11 +28,12 @@ type ApiKeyHandler struct {
 }
 
 type createKeyReq struct {
-	Name        string  `json:"name"`
-	ExpiresAt   string  `json:"expires_at"`   // RFC3339, 可空
-	IPWhitelist string  `json:"ip_whitelist"` // 逗号分隔 IP/CIDR, 空 = 不限
-	ModelLimit  string  `json:"model_limit"`  // 逗号分隔模型名, 空 = 不限
-	QuotaLimit  float64 `json:"quota_limit"`  // 额度上限 USD；0 = 不限（计费硬拦截）
+	Name          string  `json:"name"`
+	ExpiresAt     string  `json:"expires_at"`     // RFC3339, 可空
+	IPWhitelist   string  `json:"ip_whitelist"`   // 逗号分隔 IP/CIDR, 空 = 不限
+	ModelLimit    string  `json:"model_limit"`    // 逗号分隔模型名, 空 = 不限
+	ProviderLimit string  `json:"provider_limit"` // 逗号分隔渠道 ID, 空 = 不限
+	QuotaLimit    float64 `json:"quota_limit"`    // 额度上限 USD；0 = 不限（计费硬拦截）
 }
 
 // Create 签发新 key：明文仅此一次返回，库存 sha256 + AES-GCM 加密明文（供后续查看/复制）。
@@ -46,6 +48,12 @@ func (h *ApiKeyHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := middleware.UserID(r.Context())
+
+	providerLimit, err := h.normalizeProviderLimit(userID, req.ProviderLimit)
+	if err != nil {
+		resp.BadRequest(w, err.Error())
+		return
+	}
 
 	// 生成 256bit 随机 key
 	buf := make([]byte, 32)
@@ -66,15 +74,16 @@ func (h *ApiKeyHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := &model.ApiKey{
-		UserID:      userID,
-		Name:        req.Name,
-		KeyHash:     hex.EncodeToString(sum[:]),
-		KeyEnc:      enc,
-		Prefix:      plaintext[:10],
-		IPWhitelist: strings.TrimSpace(req.IPWhitelist),
-		ModelLimit:  normalizeModelLimit(req.ModelLimit),
-		QuotaLimit:  req.QuotaLimit,
-		Enabled:     true,
+		UserID:        userID,
+		Name:          req.Name,
+		KeyHash:       hex.EncodeToString(sum[:]),
+		KeyEnc:        enc,
+		Prefix:        plaintext[:10],
+		IPWhitelist:   strings.TrimSpace(req.IPWhitelist),
+		ModelLimit:    normalizeModelLimit(req.ModelLimit),
+		ProviderLimit: providerLimit,
+		QuotaLimit:    req.QuotaLimit,
+		Enabled:       true,
 	}
 	if req.ExpiresAt != "" {
 		t, err := time.Parse(time.RFC3339, req.ExpiresAt)
@@ -109,13 +118,14 @@ func (h *ApiKeyHandler) List(w http.ResponseWriter, r *http.Request) {
 
 // updateKeyReq 部分更新：nil = 不改。
 type updateKeyReq struct {
-	Name        *string  `json:"name"`
-	Enabled     *bool    `json:"enabled"`
-	ExpiresAt   *string  `json:"expires_at"` // RFC3339；"" = 清除过期
-	IPWhitelist *string  `json:"ip_whitelist"`
-	ModelLimit  *string  `json:"model_limit"`
-	QuotaLimit  *float64 `json:"quota_limit"` // 额度上限 USD；改小不追讨已消耗
-	ResetQuota  *bool    `json:"reset_quota"` // true = 重置已用额度（清零 quota_used + Redis 键）
+	Name          *string  `json:"name"`
+	Enabled       *bool    `json:"enabled"`
+	ExpiresAt     *string  `json:"expires_at"` // RFC3339；"" = 清除过期
+	IPWhitelist   *string  `json:"ip_whitelist"`
+	ModelLimit    *string  `json:"model_limit"`
+	ProviderLimit *string  `json:"provider_limit"` // 逗号分隔渠道 ID；"" = 取消绑定
+	QuotaLimit    *float64 `json:"quota_limit"`    // 额度上限 USD；改小不追讨已消耗
+	ResetQuota    *bool    `json:"reset_quota"`    // true = 重置已用额度（清零 quota_used + Redis 键）
 }
 
 // Update 编辑 key（名称/启禁用/过期/IP限制/模型限制）。
@@ -145,6 +155,15 @@ func (h *ApiKeyHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 		expiresAt = &t
 	}
+	var providerLimit *string
+	if req.ProviderLimit != nil {
+		norm, err := h.normalizeProviderLimit(userID, *req.ProviderLimit)
+		if err != nil {
+			resp.BadRequest(w, err.Error())
+			return
+		}
+		providerLimit = &norm
+	}
 	key, err := h.Op.UpdateApiKey(userID, id, func(k *model.ApiKey) {
 		if req.Name != nil {
 			k.Name = *req.Name
@@ -160,6 +179,9 @@ func (h *ApiKeyHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.ModelLimit != nil {
 			k.ModelLimit = normalizeModelLimit(*req.ModelLimit)
+		}
+		if providerLimit != nil {
+			k.ProviderLimit = *providerLimit
 		}
 		if req.QuotaLimit != nil {
 			if *req.QuotaLimit < 0 {
@@ -261,4 +283,47 @@ func normalizeModelLimit(s string) string {
 		}
 	}
 	return strings.Join(parts, ",")
+}
+
+// normalizeProviderLimit 校验并规范化渠道白名单：逗号分隔的本人渠道 ID，
+// 去重保序；非数字/非正数/不属于当前用户的 ID 一律拒绝（空串 = 不限）。
+// 存 ID 而非渠道名 —— 渠道改名不影响绑定；渠道删除/禁用后绑定自然失效。
+func (h *ApiKeyHandler) normalizeProviderLimit(userID int64, raw string) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return "", nil
+	}
+	ps, err := h.Op.ListProviders(userID)
+	if err != nil {
+		return "", fmt.Errorf("load providers failed: %w", err)
+	}
+	owned := make(map[int64]bool, len(ps))
+	for _, p := range ps {
+		owned[p.ID] = true
+	}
+	return normalizeProviderLimitIDs(raw, owned)
+}
+
+// normalizeProviderLimitIDs 白名单字符串的纯函数部分（owned = 当前用户拥有的渠道 ID）。
+func normalizeProviderLimitIDs(raw string, owned map[int64]bool) (string, error) {
+	seen := make(map[int64]bool)
+	ids := make([]string, 0, 4)
+	for _, item := range strings.Split(raw, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		id, err := strconv.ParseInt(item, 10, 64)
+		if err != nil || id <= 0 {
+			return "", fmt.Errorf("渠道 ID 无效：%s", item)
+		}
+		if !owned[id] {
+			return "", fmt.Errorf("渠道不存在或不属于当前用户：%s", item)
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, strconv.FormatInt(id, 10))
+	}
+	return strings.Join(ids, ","), nil
 }

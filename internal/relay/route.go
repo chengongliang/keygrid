@@ -20,12 +20,23 @@ type candidate struct {
 
 // buildCandidates 返回支持该模型的所有渠道，按 priority 降序、同级随机洗牌（权重化 failover 顺序）。
 // 有 model_map 的渠道只支持 map 里的模型；无 map 的渠道透传任意模型。
-func buildCandidates(providers []model.Provider, modelName string) []candidate {
+// allowProviders 非空时为 key 级渠道白名单：只保留白名单内的渠道（nil/空 = 不限）。
+func buildCandidates(providers []model.Provider, modelName string, allowProviders []int64) []candidate {
+	var allow map[int64]bool
+	if len(allowProviders) > 0 {
+		allow = make(map[int64]bool, len(allowProviders))
+		for _, id := range allowProviders {
+			allow[id] = true
+		}
+	}
 	byPriority := map[int][]candidate{}
 	for i := range providers {
 		p := &providers[i]
 		// kind=oauth 渠道参与路由（凭据在 relay.credentialSecret 解密/刷新）
 		if !p.Enabled || (p.Kind != "api_key" && p.Kind != "oauth") {
+			continue
+		}
+		if allow != nil && !allow[p.ID] {
 			continue
 		}
 		if len(p.ModelMap) > 0 {

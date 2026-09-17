@@ -21,7 +21,7 @@ func TestBuildCandidates(t *testing.T) {
 		{ID: 4, Name: "oauth", Kind: "oauth", Enabled: true, Priority: 100},
 	}
 
-	cands := buildCandidates(providers, "gpt-4o")
+	cands := buildCandidates(providers, "gpt-4o", nil)
 	// oauth 渠道也参与路由（凭据 relay 侧解密/刷新）→ 3 个候选
 	if len(cands) != 3 {
 		t.Fatalf("expected 3 candidates (enabled api_key+oauth), got %d", len(cands))
@@ -42,15 +42,32 @@ func TestBuildCandidates(t *testing.T) {
 	narrow := []model.Provider{
 		{ID: 7, Kind: "api_key", Enabled: true, ModelMap: map[string]string{"gpt-4o": "upstream-alias"}},
 	}
-	cands = buildCandidates(narrow, "other-model")
+	cands = buildCandidates(narrow, "other-model", nil)
 	if len(cands) != 0 {
 		t.Fatalf("expected 0 candidates for unmapped model, got %d", len(cands))
 	}
 
 	// 全部不可用
 	empty := []model.Provider{{ID: 8, Kind: "api_key", Enabled: false}}
-	if cands = buildCandidates(empty, "x"); len(cands) != 0 {
+	if cands = buildCandidates(empty, "x", nil); len(cands) != 0 {
 		t.Fatal("expected no candidates when no channel enabled")
+	}
+
+	// key 级渠道白名单：只保留白名单内渠道，优先级顺序仍生效
+	if cands = buildCandidates(providers, "gpt-4o", []int64{1}); len(cands) != 1 || cands[0].provider.ID != 1 {
+		t.Fatalf("provider whitelist [1] must keep only channel 1, got %+v", cands)
+	}
+	cands = buildCandidates(providers, "gpt-4o", []int64{1, 2})
+	if len(cands) != 2 || cands[0].provider.ID != 2 || cands[1].provider.ID != 1 {
+		t.Fatalf("provider whitelist [1,2] must keep 2,1 by priority, got %+v", cands)
+	}
+	// 白名单指向禁用渠道 → 无候选（渠道池为空由 relayCore 转 403 提示）
+	if cands = buildCandidates(providers, "gpt-4o", []int64{3}); len(cands) != 0 {
+		t.Fatalf("disabled channel in whitelist must yield no candidates, got %+v", cands)
+	}
+	// 白名单不含任何支持该模型的渠道 → 无候选
+	if cands = buildCandidates(narrow, "gpt-4o", []int64{99}); len(cands) != 0 {
+		t.Fatalf("whitelist outside channel pool must yield no candidates, got %+v", cands)
 	}
 }
 

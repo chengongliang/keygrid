@@ -166,10 +166,15 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 	userID := middleware.UserID(r.Context())
 	apiKeyID := middleware.APIKeyID(r.Context())
 
-	// key 级模型限制（ApiKey.ModelLimit 非空时只放行白名单模型）
-	if k := middleware.APIKeyObj(r.Context()); k != nil && k.ModelLimit != "" && !middleware.ModelAllowed(k.ModelLimit, req.Model) {
+	// key 级限制：模型白名单（ModelLimit）+ 渠道白名单（ProviderLimit），二者均空 = 不限
+	apiKeyObj := middleware.APIKeyObj(r.Context())
+	if apiKeyObj != nil && apiKeyObj.ModelLimit != "" && !middleware.ModelAllowed(apiKeyObj.ModelLimit, req.Model) {
 		gatewayError(w, entry, http.StatusForbidden, "model "+req.Model+" not allowed for this api key")
 		return
+	}
+	var allowedProviders []int64
+	if apiKeyObj != nil {
+		allowedProviders = apiKeyObj.ProviderIDs()
 	}
 
 	// 0. 限流（按 api_key：RPM + 并发）
@@ -181,21 +186,27 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 	defer release()
 
 	// 0.5 额度硬限额（key 级，计费）：超限 402，请求不进渠道池
-	if k := middleware.APIKeyObj(r.Context()); k != nil && h.Quota != nil {
-		if used, limit, over := h.Quota.OverLimit(r.Context(), k); over {
+	if apiKeyObj != nil && h.Quota != nil {
+		if used, limit, over := h.Quota.OverLimit(r.Context(), apiKeyObj); over {
 			quotaExceededResponse(w, entry, used, limit)
 			return
 		}
 	}
 
-	// 1. 在 user 自己的渠道池里构建候选（priority 降序 + 同级随机）
+	// 1. 在 user 自己的渠道池里构建候选（priority 降序 + 同级随机；key 渠道白名单过滤）
 	ps, err := h.Op.ListProviders(userID)
 	if err != nil {
 		gatewayError(w, entry, http.StatusServiceUnavailable, "no available channel for model "+req.Model)
 		return
 	}
-	cands := buildCandidates(ps, req.Model)
+	cands := buildCandidates(ps, req.Model, allowedProviders)
 	if len(cands) == 0 {
+		// 绑定了渠道但白名单内没有可用候选：403 比 503 更能提示是 key 绑定导致
+		// （渠道被禁用/删除，或绑定渠道均不支持该模型）
+		if len(allowedProviders) > 0 {
+			gatewayError(w, entry, http.StatusForbidden, "no bound channel of this api key serves model "+req.Model)
+			return
+		}
 		gatewayError(w, entry, http.StatusServiceUnavailable, "no available channel for model "+req.Model)
 		return
 	}

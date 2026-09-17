@@ -623,9 +623,14 @@ func (o *Op) UserCostSummary(userID int64) (*UsageCostSummary, error) {
 }
 
 // ListUserModels 聚合本人 enabled 渠道的模型列表（model_map keys；无 map 渠道无法枚举，跳过）。
-func (o *Op) ListUserModels(userID int64) ([]string, error) {
+// providerIDs 非空时仅统计白名单内渠道（key 级渠道绑定，nil/空 = 不限）。
+func (o *Op) ListUserModels(userID int64, providerIDs []int64) ([]string, error) {
+	q := o.DB.Where("user_id = ? AND enabled = ?", userID, true)
+	if len(providerIDs) > 0 {
+		q = q.Where("id IN ?", providerIDs)
+	}
 	var ps []model.Provider
-	if err := o.DB.Where("user_id = ? AND enabled = ?", userID, true).Find(&ps).Error; err != nil {
+	if err := q.Find(&ps).Error; err != nil {
 		return nil, err
 	}
 	seen := map[string]bool{}

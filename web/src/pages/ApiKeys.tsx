@@ -1,14 +1,14 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Copy, Pencil, Settings2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { api, type ApiKey } from '@/lib/api'
+import { api, type ApiKey, type Provider } from '@/lib/api'
 import i18n from '@/i18n'
 import { Modal } from './Providers'
 
 // ---- 列设置（参考 new-api「查看」列切换，localStorage 记忆）----
 // 列名 → i18n key（非组件常量存 key，渲染处统一 t()；名称/状态/模型复用 common 域）
 type ColKey =
-  | 'name' | 'status' | 'key' | 'models' | 'ip' | 'quota'
+  | 'name' | 'status' | 'key' | 'models' | 'providers' | 'ip' | 'quota'
   | 'created' | 'last_used' | 'expires'
 
 const COL_LABELS: Record<ColKey, string> = {
@@ -16,6 +16,7 @@ const COL_LABELS: Record<ColKey, string> = {
   status: 'common.status',
   key: 'keys.col.key',
   models: 'common.model',
+  providers: 'keys.col.providers',
   ip: 'keys.col.ip',
   quota: 'keys.col.quota',
   created: 'keys.col.created',
@@ -185,12 +186,23 @@ const toLocalInput = (iso?: string | null) => {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
+// 渠道绑定（provider_limit）：逗号分隔渠道 ID ↔ number[]（非法项过滤）
+const parseProviderLimit = (s?: string): number[] =>
+  (s || '')
+    .split(',')
+    .map((x) => Number(x.trim()))
+    .filter((n) => Number.isInteger(n) && n > 0)
+
 export default function ApiKeys() {
   const { t } = useTranslation()
   const [keys, setKeys] = useState<ApiKey[]>([])
   const [err, setErr] = useState('')
   const [copiedId, setCopiedId] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
+
+  // 渠道列表（渠道绑定选择器 + 绑定列名称展示）
+  const [providers, setProviders] = useState<Provider[]>([])
+  const [providersLoaded, setProvidersLoaded] = useState(false)
 
   // 列显隐（查看）
   const [cols, setCols] = useState<Record<ColKey, boolean>>(loadCols)
@@ -204,6 +216,7 @@ export default function ApiKeys() {
   const [nIP, setNIP] = useState('')
   const [nModels, setNModels] = useState('')
   const [nQuota, setNQuota] = useState('')
+  const [nProv, setNProv] = useState<number[]>([])
 
   // 编辑
   const [editing, setEditing] = useState<ApiKey | null>(null)
@@ -214,6 +227,7 @@ export default function ApiKeys() {
   const [eIP, setEIP] = useState('')
   const [eModels, setEModels] = useState('')
   const [eQuota, setEQuota] = useState('')
+  const [eProv, setEProv] = useState<number[]>([])
   const [eResetQuota, setEResetQuota] = useState(false)
 
   // 创建成功弹窗
@@ -228,6 +242,10 @@ export default function ApiKeys() {
 
   const load = () => {
     api.get<ApiKey[]>('/api/keys').then((d) => setKeys(d ?? [])).catch((e) => setErr(e.message))
+    // 渠道列表：失败不标记 loaded —— 编辑保存时原样提交绑定，交由后端校验归属
+    api.get<Provider[]>('/api/providers')
+      .then((d) => { setProviders(d ?? []); setProvidersLoaded(true) })
+      .catch((e) => setErr(e.message))
   }
   useEffect(load, [])
 
@@ -254,6 +272,7 @@ export default function ApiKeys() {
         name: nName,
         ip_whitelist: nIP.trim(),
         model_limit: nModels.trim(),
+        provider_limit: nProv.join(','),
       }
       // 额度上限（USD）：留空 = 不限
       if (nQuota.trim() !== '') body.quota_limit = Number(nQuota)
@@ -262,7 +281,7 @@ export default function ApiKeys() {
       setCreating(false)
       setCreated(r.api_key)
       setCreatedCopied(false)
-      setNName(''); setNExpiresAt(''); setNIP(''); setNModels(''); setNQuota('')
+      setNName(''); setNExpiresAt(''); setNIP(''); setNModels(''); setNQuota(''); setNProv([])
       load()
     } catch (e: any) { setErr(e.message) } finally { setBusy(false) }
   }
@@ -274,6 +293,7 @@ export default function ApiKeys() {
     setEIP(k.ip_whitelist || '')
     setEModels(k.model_limit || '')
     setEQuota(k.quota_limit ? String(k.quota_limit) : '')
+    setEProv(parseProviderLimit(k.provider_limit))
     setEResetQuota(false)
     if (k.expires_at) { setEExpiresAt(toLocalInput(k.expires_at)); setENoExpiry(false) }
     else { setEExpiresAt(''); setENoExpiry(true) }
@@ -284,12 +304,15 @@ export default function ApiKeys() {
     if (!eNoExpiry && !eExpiresAt) { setErr(t('keys.pleasePickExpiry')); return }
     setBusy(true); setErr('')
     try {
+      // 渠道列表已加载 → 清洗已删除渠道的悬空绑定；未加载 → 原样提交（后端校验归属）
+      const providerLimit = (providersLoaded ? eProv.filter((id) => knownProviderIds.has(id)) : eProv).join(',')
       const body: Record<string, unknown> = {
         name: eName,
         enabled: eEnabled,
         expires_at: eNoExpiry ? '' : new Date(eExpiresAt).toISOString(),
         ip_whitelist: eIP.trim(),
         model_limit: eModels.trim(),
+        provider_limit: providerLimit,
         // 额度上限：留空 = 不限（0）
         quota_limit: eQuota.trim() === '' ? 0 : Number(eQuota),
       }
@@ -349,6 +372,14 @@ export default function ApiKeys() {
 
   const th = (c: ColKey, label?: string) =>
     cols[c] ? <th className="px-4 py-3 whitespace-nowrap">{label ?? t(COL_LABELS[c])}</th> : null
+
+  // 渠道绑定辅助：ID → 展示名；已加载渠道列表时识别"悬空绑定"（渠道已删除）
+  const providerNames = useMemo(
+    () => new Map(providers.map((p) => [p.id, p.name || `#${p.id}`])),
+    [providers],
+  )
+  const knownProviderIds = useMemo(() => new Set(providers.map((p) => p.id)), [providers])
+  const eProvOrphan = providersLoaded ? eProv.filter((id) => !knownProviderIds.has(id)) : []
 
   return (
     <div>
@@ -467,6 +498,7 @@ export default function ApiKeys() {
               {th('status')}
               {th('key')}
               {th('models')}
+              {th('providers')}
               {th('ip')}
               {th('quota')}
               {th('created')}
@@ -510,6 +542,20 @@ export default function ApiKeys() {
                         : t('keys.unlimited')}
                     </td>
                   )}
+                  {cols.providers && (
+                    <td className="max-w-40 px-4 py-3 text-xs text-muted">
+                      {k.provider_limit
+                        ? (
+                          <span
+                            className="line-clamp-2 break-all"
+                            title={parseProviderLimit(k.provider_limit).map((id) => providerNames.get(id) ?? `#${id}`).join(', ')}
+                          >
+                            {parseProviderLimit(k.provider_limit).map((id) => providerNames.get(id) ?? `#${id}`).join(', ')}
+                          </span>
+                        )
+                        : t('keys.unlimited')}
+                    </td>
+                  )}
                   {cols.ip && (
                     <td className="max-w-36 px-4 py-3 font-mono text-xs text-muted">
                       {k.ip_whitelist
@@ -537,7 +583,7 @@ export default function ApiKeys() {
               )
             })}
             {keys.length === 0 && (
-              <tr><td colSpan={10} className="px-4 py-10 text-center text-muted">{t('keys.empty')}</td></tr>
+              <tr><td colSpan={11} className="px-4 py-10 text-center text-muted">{t('keys.empty')}</td></tr>
             )}
           </tbody>
         </table>
@@ -558,6 +604,11 @@ export default function ApiKeys() {
             <div>
               <label className="label">{t('keys.modelLimitOptional')}</label>
               <input className="input" value={nModels} onChange={(e) => setNModels(e.target.value)} placeholder={t('keys.modelLimitPlaceholder')} />
+            </div>
+            <div>
+              <label className="label">{t('keys.providerLimitOptional')}</label>
+              <ProviderPicker providers={providers} selected={nProv} onChange={setNProv} />
+              <p className="mt-1 text-xs text-muted">{t('keys.providerLimitHint')}</p>
             </div>
             <div>
               <label className="label">{t('keys.ipWhitelistOptional')}</label>
@@ -604,6 +655,16 @@ export default function ApiKeys() {
               <input className="input" value={eModels} onChange={(e) => setEModels(e.target.value)} placeholder={t('keys.modelLimitPlaceholder')} />
             </div>
             <div>
+              <label className="label">{t('keys.providerLimit')}</label>
+              <ProviderPicker providers={providers} selected={eProv} onChange={setEProv} />
+              <p className="mt-1 text-xs text-muted">{t('keys.providerLimitHint')}</p>
+              {eProvOrphan.length > 0 && (
+                <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+                  {t('keys.providerOrphanHint', { count: eProvOrphan.length })}
+                </p>
+              )}
+            </div>
+            <div>
               <label className="label">{t('keys.ipWhitelist')}</label>
               <input className="input" value={eIP} onChange={(e) => setEIP(e.target.value)} placeholder={t('keys.ipWhitelistPlaceholder')} />
             </div>
@@ -639,6 +700,43 @@ export default function ApiKeys() {
           </div>
         </Modal>
       )}
+    </div>
+  )
+}
+
+// ProviderPicker 渠道绑定多选：勾选 = 该 Key 只路由到这些渠道（不勾 = 不限）。
+// selected 中不在渠道列表里的 ID（渠道已删除，或列表尚未加载）单独渲染为「已删除」行，
+// 用户可取消；保存时清除悬空绑定（见 saveEdit）。
+function ProviderPicker({ providers, selected, onChange }: {
+  providers: Provider[]
+  selected: number[]
+  onChange: (ids: number[]) => void
+}) {
+  const { t } = useTranslation()
+  const known = new Set(providers.map((p) => p.id))
+  const orphans = selected.filter((id) => !known.has(id))
+  const toggle = (id: number) =>
+    onChange(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id])
+  if (providers.length === 0 && orphans.length === 0) {
+    return <p className="text-xs text-muted">{t('keys.noProviderForBinding')}</p>
+  }
+  const row = 'flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-sm transition hover:bg-black/5 dark:hover:bg-white/5'
+  return (
+    <div className="max-h-44 space-y-0.5 overflow-auto rounded-lg border p-1.5" style={{ borderColor: 'var(--line)' }}>
+      {providers.map((p) => (
+        <label key={p.id} className={row}>
+          <input type="checkbox" className="accent-violet-600" checked={selected.includes(p.id)} onChange={() => toggle(p.id)} />
+          <span className={'min-w-0 truncate' + (p.enabled ? '' : ' text-muted')}>{p.name || `#${p.id}`}</span>
+          <span className="ml-auto shrink-0 text-xs text-soft">{p.kind === 'oauth' ? 'OAuth' : 'API Key'}</span>
+        </label>
+      ))}
+      {orphans.map((id) => (
+        <label key={id} className={row}>
+          <input type="checkbox" className="accent-violet-600" checked onChange={() => toggle(id)} />
+          <span className="text-muted">#{id}</span>
+          <span className="ml-auto shrink-0 text-xs text-soft">{t('keys.providerDeleted')}</span>
+        </label>
+      ))}
     </div>
   )
 }
