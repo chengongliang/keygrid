@@ -60,6 +60,8 @@ const providers = {
     namePhOauth: '我的 Kimi',
     namePhApi: '我的 DeepSeek',
     baseUrlLabel: 'Base URL *（OpenAI 兼容）',
+    baseUrlOauthLabel: '上游地址 *（Responses endpoint）',
+    baseUrlOauthHint: 'OAuth 渠道的上游转发地址；Codex 需完整 endpoint（…/backend-api/codex/responses），留空则用平台默认值。',
     getApiKey: '申请 API Key',
     builtinModels: '内置模型：{{models}}',
     modelsMore: ' 等 {{count}} 个',

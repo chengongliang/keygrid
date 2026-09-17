@@ -59,6 +59,26 @@ func IsCodexProvider(p *model.Provider) bool {
 	return p != nil && p.Kind == "oauth" && p.OAuthProvider == "openai"
 }
 
+// NormalizeCodexBaseURL Codex（openai oauth）渠道 base_url 归一化：渠道约定为完整
+// Responses endpoint（presets.go 的 https://chatgpt.com/backend-api/codex/responses）。
+// 历史默认值与手工填写常漏尾段，POST 到 https://chatgpt.com/backend-api 会拿到
+// 非 SSE 响应（客户端表现为 response.completed 前流中断，极难定位）。
+// 幂等：已完整的地址与自定义第三方 Responses endpoint 原样返回。
+func NormalizeCodexBaseURL(baseURL string) string {
+	t := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	switch {
+	case t == "":
+		return ""
+	case strings.HasSuffix(t, "/codex/responses"), strings.HasSuffix(t, "/responses"):
+		return t
+	case strings.HasSuffix(t, "/backend-api/codex"):
+		return t + "/responses"
+	case strings.HasSuffix(t, "/backend-api"):
+		return t + "/codex/responses"
+	}
+	return t
+}
+
 // ---- 请求转换：chat/completions → responses ----
 
 // BuildCodexRequest 把 OpenAI chat/completions 请求体转成 Codex Responses 请求体。
@@ -1155,6 +1175,56 @@ var codexSSEUserOutputTypes = map[string]bool{
 	"response.custom_tool_call_input.delta":  true,
 }
 
+// codexNonSSEError Codex 渠道上游 HTTP 200 但响应体不是 SSE 事件流：绝大多数情况是
+// 渠道 base_url 指到了非 Responses endpoint（如只写到 https://chatgpt.com/backend-api）。
+// Error() 只给诊断（可写日志/错误链），Detail() 给上游正文摘要（仅回调用方，勿落库）。
+type codexNonSSEError struct {
+	status      int
+	contentType string
+	detail      string
+}
+
+func (e *codexNonSSEError) Error() string {
+	return fmt.Sprintf("codex upstream returned non-SSE response (http %d, content-type %q); check channel base_url", e.status, e.contentType)
+}
+
+// Detail 上游响应摘要（可能含请求回显，仅供发起请求的调用方排查）。
+func (e *codexNonSSEError) Detail() string { return e.detail }
+
+// codexSSEFrameLike 事件是否像一条 SSE 帧：取首个非空行，字段名需是 data/event/id/retry
+// 或注释行 ":"（WHATWG SSE 仅定义这几个字段，未知字段名一律忽略）。
+// HTML/JSON/纯文本错误页会被判为非 SSE。
+func codexSSEFrameLike(event []byte) bool {
+	for _, raw := range bytes.Split(event, []byte("\n")) {
+		line := bytes.TrimSpace(raw)
+		if len(line) == 0 {
+			continue
+		}
+		if line[0] == ':' { // 注释/心跳行
+			return true
+		}
+		colon := bytes.IndexByte(line, ':')
+		if colon <= 0 {
+			return false
+		}
+		switch strings.ToLower(string(bytes.TrimSpace(line[:colon]))) {
+		case "data", "event", "id", "retry":
+			return true
+		}
+		return false
+	}
+	return true // 全是空行：没有判定为非 SSE 的证据
+}
+
+// codexBodySnippet 上游正文摘要（先按字节截断再空白压缩），仅回给调用方排查。
+func codexBodySnippet(b []byte) string {
+	const maxBytes = 512
+	if len(b) > maxBytes {
+		b = b[:maxBytes]
+	}
+	return truncUTF8(strings.Join(strings.Fields(string(b)), " "), 200)
+}
+
 // peekCodexSSEError 在 HTTP 200 Codex SSE 首个用户可见输出前探测可重试错误。
 // 每次按完整 SSE 事件读取，response.created、in_progress 和 reasoning 事件不会
 // 提前结束探测；正常输出、EOF 或字节上限会把已读前缀与剩余 Body 无损拼回。
@@ -1171,6 +1241,17 @@ func peekCodexSSEError(upResp *http.Response) (int, error) {
 	for prefix.Len() < codexSSEPeekLimit {
 		event, readErr := readCodexSSEEvent(reader)
 		if len(event) > 0 {
+			// 200 但不是 SSE 事件流：多半渠道 base_url 指到了非 Responses
+			// endpoint（历史默认值 https://chatgpt.com/backend-api 就属此类）。
+			// 必须在写出任何字节前明确报错，否则非 SSE 正文会被当 SSE 透传，
+			// 客户端只看到「response.completed 前流中断」，无法定位。
+			if !codexSSEFrameLike(event) {
+				return http.StatusBadGateway, &codexNonSSEError{
+					status:      upResp.StatusCode,
+					contentType: upResp.Header.Get("Content-Type"),
+					detail:      codexBodySnippet(event),
+				}
+			}
 			_, _ = prefix.Write(event)
 			// 用户可见输出一旦开始，本次请求就不能再 failover；即便正文恰好
 			// 包含暂态错误关键词，也必须优先按正常输出回放。

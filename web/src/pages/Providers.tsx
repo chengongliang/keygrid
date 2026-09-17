@@ -270,6 +270,9 @@ export default function Providers() {
       oauth_provider: key,
       presetKey: p?.key ?? '',
       protocol: p?.protocol ?? wiz!.protocol,
+      // 与预设卡片一致：OAuth 渠道同样要落到完整上游端点（历史后端默认值曾缺
+      // /codex/responses 尾段，见 relay.NormalizeCodexBaseURL）
+      base_url: p?.base_url ?? '',
       // 展示名未手动编辑过则跟随新平台；无预设平台清掉旧自动名（placeholder 兜底）
       name: wiz!.nameTouched ? wiz!.name : (p?.key ?? ''),
       use_proxy: p?.needs_proxy ?? false,
@@ -420,8 +423,9 @@ export default function Providers() {
       // 计费名映射（P1.5）：空对象 = 清空；后端校验映射目标必须在价格表内
       billing_map: editForm.billing_map,
     }
-    // base_url 仅 api_key 渠道提交（oauth 渠道编辑弹窗不展示该字段，避免无意义的审计记录）
-    if (editForm.kind === 'api_key') body.base_url = editForm.base_url
+    // base_url 两种渠道都提交：OAuth 渠道（尤其 Codex）同样要求完整上游端点，
+    // 放开编辑用于修正历史默认值造成的错误地址（后端会归一化，空值回退默认）
+    body.base_url = editForm.base_url
     // api_key 仅在填写时轮换凭据（后端约定：空/缺省 = 保留原凭据）
     if (editForm.kind === 'api_key' && editForm.api_key) body.api_key = editForm.api_key
     try {
@@ -742,11 +746,11 @@ export default function Providers() {
           {wiz.step === 1 && (
             <div className="grid grid-cols-2 gap-3">
               {/* 切换渠道类型：上个类型遗留的展示名/模型映射/探测结果一并清掉 */}
-              <button className="card text-left hover:border-violet-700" onClick={() => { resetProbe(); setWiz({ ...wiz, kind: 'api_key', step: 2, ...(wiz.kind !== 'api_key' ? { name: '', nameTouched: false, model_map_text: '' } : {}) }) }}>
+              <button className="card text-left hover:border-violet-700" onClick={() => { resetProbe(); setWiz({ ...wiz, kind: 'api_key', step: 2, ...(wiz.kind !== 'api_key' ? { name: '', nameTouched: false, model_map_text: '', base_url: '' } : {}) }) }}>
                 <div className="font-medium">API Key</div>
                 <div className="mt-1 text-xs text-muted">{t('providers.wizard.typeApiKeyDesc')}</div>
               </button>
-              <button className="card text-left hover:border-violet-700" onClick={() => { resetProbe(); setWiz({ ...wiz, kind: 'oauth', step: 2, ...(wiz.kind !== 'oauth' ? { name: '', nameTouched: false, model_map_text: '' } : {}) }) }}>
+              <button className="card text-left hover:border-violet-700" onClick={() => { resetProbe(); setWiz({ ...wiz, kind: 'oauth', step: 2, ...(wiz.kind !== 'oauth' ? { name: '', nameTouched: false, model_map_text: '', base_url: '' } : {}) }) }}>
                 <div className="font-medium">{t('providers.wizard.typeOauth')}</div>
                 <div className="mt-1 text-xs text-muted">{t('providers.wizard.typeOauthDesc')}</div>
               </button>
@@ -783,7 +787,7 @@ export default function Providers() {
                 <label className="label">{t('providers.nameLabel')}</label>
                 <input className="input" value={wiz.name} onChange={(e) => setWiz({ ...wiz, name: e.target.value, nameTouched: true })} placeholder={wiz.kind === 'oauth' ? t('providers.wizard.namePhOauth') : t('providers.wizard.namePhApi')} />
               </div>
-              {wiz.kind === 'oauth' ? (
+              {wiz.kind === 'oauth' && (
                 <div>
                   <label className="label">OAuth Provider *</label>
                   <select className="input" value={wiz.oauth_provider} onChange={(e) => applyOauthProvider(e.target.value)}>
@@ -795,12 +799,12 @@ export default function Providers() {
                     <p className="mt-1 text-xs text-muted">🔐 {p.auth_mode}</p>
                   ) : null })()}
                 </div>
-              ) : (
-                <div>
-                  <label className="label">{t('providers.wizard.baseUrlLabel')}</label>
-                  <input className="input" value={wiz.base_url} onChange={(e) => setWiz({ ...wiz, base_url: e.target.value })} placeholder="https://api.deepseek.com" />
-                </div>
               )}
+              <div>
+                <label className="label">{wiz.kind === 'oauth' ? t('providers.wizard.baseUrlOauthLabel') : t('providers.wizard.baseUrlLabel')}</label>
+                <input className="input" value={wiz.base_url} onChange={(e) => setWiz({ ...wiz, base_url: e.target.value })} placeholder={wiz.kind === 'oauth' ? 'https://chatgpt.com/backend-api/codex/responses' : 'https://api.deepseek.com'} />
+                {wiz.kind === 'oauth' && <p className="mt-1 text-xs text-muted">{t('providers.wizard.baseUrlOauthHint')}</p>}
+              </div>
               {(() => { const p = findPreset(wiz.presetKey) || findPreset(wiz.oauth_provider); return p ? (
                 <p className="text-xs text-muted">
                   {p.api_key_url && <>🔑 <a className="underline" href={p.api_key_url} target="_blank" rel="noreferrer">{t('providers.wizard.getApiKey')}</a> · </>}
@@ -1164,18 +1168,18 @@ export default function Providers() {
               <label className="label">{t('providers.nameLabel')}</label>
               <input className="input" value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} placeholder={t('providers.wizard.namePhApi')} />
             </div>
-            {editForm.kind === 'oauth' ? (
+            {editForm.kind === 'oauth' && (
               <div>
                 <label className="label">OAuth Provider</label>
                 <input className="input" value={editForm.oauth_provider} disabled />
                 <p className="mt-1 text-xs text-muted">{t('providers.edit.oauthLocked')}</p>
               </div>
-            ) : (
-              <div>
-                <label className="label">{t('providers.wizard.baseUrlLabel')}</label>
-                <input className="input" value={editForm.base_url} onChange={(e) => setEditForm({ ...editForm, base_url: e.target.value })} placeholder="https://api.deepseek.com" />
-              </div>
             )}
+            <div>
+              <label className="label">{editForm.kind === 'oauth' ? t('providers.wizard.baseUrlOauthLabel') : t('providers.wizard.baseUrlLabel')}</label>
+              <input className="input" value={editForm.base_url} onChange={(e) => setEditForm({ ...editForm, base_url: e.target.value })} placeholder={editForm.kind === 'oauth' ? 'https://chatgpt.com/backend-api/codex/responses' : 'https://api.deepseek.com'} />
+              {editForm.kind === 'oauth' && <p className="mt-1 text-xs text-muted">{t('providers.wizard.baseUrlOauthHint')}</p>}
+            </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="label">{t('providers.protocolLabel')}</label>

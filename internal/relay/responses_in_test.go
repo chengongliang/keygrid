@@ -10,6 +10,36 @@ import (
 
 // ---- 请求转换：/v1/responses → pivot ----
 
+// Codex 客户端的 developer 消息经 pivot 后不得原样进入 OpenAI 兼容上游请求
+// （DeepSeek 等只认 system/user/assistant/tool，收到 developer 会 400 拒绝）。
+func TestResponsesDeveloperRoleNormalizedForOpenAIUpstream(t *testing.T) {
+	pivot, _, _, err := responsesToPivotRequest([]byte(`{
+		"model": "m",
+		"input": [
+			{"type": "message", "role": "developer", "content": "env ctx"},
+			{"type": "message", "role": "user", "content": "hi"}
+		]
+	}`))
+	if err != nil {
+		t.Fatalf("responsesToPivotRequest: %v", err)
+	}
+	up := buildUpstreamBody(pivot, "m", "m")
+	var body map[string]any
+	if err := json.Unmarshal(up, &body); err != nil {
+		t.Fatalf("upstream body: %v", err)
+	}
+	msgs, _ := body["messages"].([]any)
+	if len(msgs) != 2 {
+		t.Fatalf("messages: %v", msgs)
+	}
+	if msgs[0].(map[string]any)["role"] != "system" {
+		t.Fatalf("developer must be normalized to system: %v", msgs)
+	}
+	if msgs[1].(map[string]any)["role"] != "user" {
+		t.Fatalf("user role must survive: %v", msgs)
+	}
+}
+
 func TestResponsesToPivotRequestShape(t *testing.T) {
 	body := `{
 		"model": "gpt-5.4",

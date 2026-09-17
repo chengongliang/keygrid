@@ -2,6 +2,7 @@ package relay
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -786,5 +787,165 @@ func TestUpstreamCallCodexUpstreamError(t *testing.T) {
 	}
 	if w.Body.Len() != 0 {
 		t.Fatalf("nothing should be written to client on upstream error, got %q", w.Body.String())
+	}
+}
+
+// ---- Codex base_url 归一化（历史默认值缺 /codex/responses 尾段）----
+
+func TestNormalizeCodexBaseURL(t *testing.T) {
+	cases := []struct{ in, want string }{
+		// 本次故障场景：历史默认值缺尾段 → 补全
+		{"https://chatgpt.com/backend-api", "https://chatgpt.com/backend-api/codex/responses"},
+		{"https://chatgpt.com/backend-api/", "https://chatgpt.com/backend-api/codex/responses"},
+		{"https://chatgpt.com/backend-api/codex", "https://chatgpt.com/backend-api/codex/responses"},
+		{"  https://chatgpt.com/backend-api/codex/responses/  ", "https://chatgpt.com/backend-api/codex/responses"},
+		// 完整 endpoint / 自定义第三方 Responses endpoint 原样
+		{"https://chatgpt.com/backend-api/codex/responses", "https://chatgpt.com/backend-api/codex/responses"},
+		{"https://relay.example.com/v1/responses", "https://relay.example.com/v1/responses"},
+		{"https://my-worker.example.workers.dev/backend-api", "https://my-worker.example.workers.dev/backend-api/codex/responses"},
+		// 非官方形态不猜（非 Codex 兼容地址原样透出，由上游报错）
+		{"https://api.openai.com/v1", "https://api.openai.com/v1"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := NormalizeCodexBaseURL(c.in); got != c.want {
+			t.Errorf("NormalizeCodexBaseURL(%q) = %q, want %q", c.in, got, c.want)
+		}
+		// 幂等：归一化结果再归一化必须稳定（转发路径每次请求都会调用）
+		if got := NormalizeCodexBaseURL(c.want); got != c.want {
+			t.Errorf("NormalizeCodexBaseURL(%q) 非幂等: %q", c.want, got)
+		}
+	}
+}
+
+// ---- 200 + 非 SSE 正文：必须明确报错（可 failover），不能当 SSE 透传 ----
+
+func TestPeekCodexSSENonSSEBody(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		ct   string
+	}{
+		{"html", "<!DOCTYPE html><html><head><title>404</title></head><body>not found</body></html>", "text/html; charset=utf-8"},
+		{"json", `{"detail":"Not Found"}`, "application/json"},
+		{"plain text", "Bad Gateway", "text/plain"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{tt.ct}},
+				Body:       io.NopCloser(strings.NewReader(tt.body)),
+			}
+			status, err := peekCodexSSEError(resp)
+			if err == nil || status != http.StatusBadGateway {
+				t.Fatalf("非 SSE 正文必须快速失败: status=%d err=%v", status, err)
+			}
+			var ne *codexNonSSEError
+			if !errors.As(err, &ne) {
+				t.Fatalf("error type = %T, want *codexNonSSEError", err)
+			}
+			if ne.Detail() == "" || len([]rune(ne.Detail())) > 200 {
+				t.Fatalf("detail 必须非空且截断: %q", ne.Detail())
+			}
+			if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "<html") {
+				t.Fatalf("Error() 不得携带上游正文（可能回显请求）: %q", err.Error())
+			}
+		})
+	}
+}
+
+// 非 SSE 判定不能误伤正常事件流（含注释心跳、多字段事件）
+func TestCodexSSEFrameLike(t *testing.T) {
+	frames := []string{
+		"data: {\"type\":\"response.created\"}\n\n",
+		"event: response.created\ndata: {}\n\n",
+		": keep-alive\n\n",
+		"id: 7\nretry: 100\ndata: {}\n\n",
+		"DATA: {\"type\":\"response.created\"}\n\n", // 字段名大小写不敏感
+		"\n", // 纯空行：无判定证据
+	}
+	for _, s := range frames {
+		if !codexSSEFrameLike([]byte(s)) {
+			t.Errorf("must be accepted as SSE frame: %q", s)
+		}
+	}
+	nonFrames := []string{
+		`{"detail":"Not Found"}`,
+		"<!DOCTYPE html>\n<html>",
+		"<html><head><title>403 Forbidden</title></head>",
+		"Bad Gateway",
+		"{\"error\":{\"message\":\"x\"}}",
+	}
+	for _, s := range nonFrames {
+		if codexSSEFrameLike([]byte(s)) {
+			t.Errorf("must be rejected as non-SSE: %q", s)
+		}
+	}
+}
+
+// 200 非 SSE 时上游正文不得写进客户端响应（failover 前置条件）
+func TestUpstreamCallCodexNonSSEWritesNothing(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte("<html><body>upstream error page</body></html>"))
+	}))
+	defer up.Close()
+
+	h := NewHandler(nil)
+	w := httptest.NewRecorder()
+	body, _ := BuildCodexRequest([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`), "gpt-5.4")
+	status, _, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, up.URL, "tok", "", body, true, protoResponses, w, nil)
+	if err == nil || status != http.StatusBadGateway {
+		t.Fatalf("status=%d err=%v, want 502", status, err)
+	}
+	if w.Body.Len() != 0 || w.Code != http.StatusOK {
+		t.Fatalf("非 SSE 上游不得写客户端: code=%d body=%q", w.Code, w.Body.String())
+	}
+}
+
+// 存量错渠道（历史默认值缺 /codex/responses 尾段）经归一化后真实打到完整
+// endpoint，且 responses 入口 SSE 透传、usage 记账均正常（relay 转发侧接线验证）。
+func TestUpstreamCallCodexNormalizedHistoricalBaseURL(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(
+			"data: {\"type\":\"response.created\",\"response\":{\"model\":\"gpt-5.5\"}}\n\n" +
+				"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n" +
+				"data: {\"type\":\"response.completed\",\"response\":{\"output\":[],\"usage\":{\"input_tokens\":11,\"output_tokens\":5}}}\n\n"))
+	}))
+	defer up.Close()
+
+	// 上游地址 = 历史错误默认值形态（只有 /backend-api）
+	target := NormalizeCodexBaseURL(up.URL + "/backend-api")
+	if !strings.HasSuffix(target, "/backend-api/codex/responses") {
+		t.Fatalf("normalized target = %q", target)
+	}
+
+	h := NewHandler(nil)
+	w := httptest.NewRecorder()
+	body, err := BuildCodexRequestFromResponses([]byte(`{"model":"gpt-5.5","input":"hi","stream":true}`), "gpt-5.5")
+	if err != nil {
+		t.Fatalf("BuildCodexRequestFromResponses: %v", err)
+	}
+	status, usage, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, target, "tok", "", body, true, protoResponses, w, nil)
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("status=%d err=%v", status, err)
+	}
+	if gotPath != "/backend-api/codex/responses" {
+		t.Fatalf("上游路径 = %q, want /backend-api/codex/responses", gotPath)
+	}
+	if !strings.Contains(string(gotBody), `"stream":true`) {
+		t.Fatalf("上游请求体: %s", gotBody)
+	}
+	if usage.PromptTokens != 11 || usage.CompletionTokens != 5 || !usage.Found {
+		t.Fatalf("usage = %+v, want 11/5", usage)
+	}
+	if got := w.Body.String(); !strings.Contains(got, "response.completed") {
+		t.Fatalf("客户端未收到完整 SSE: %s", got)
 	}
 }

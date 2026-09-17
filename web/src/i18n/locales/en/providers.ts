@@ -60,6 +60,8 @@ const providers = {
     namePhOauth: 'My Kimi',
     namePhApi: 'My DeepSeek',
     baseUrlLabel: 'Base URL * (OpenAI-compatible)',
+    baseUrlOauthLabel: 'Upstream URL * (Responses endpoint)',
+    baseUrlOauthHint: 'Upstream URL for OAuth channels; Codex requires the full endpoint (…/backend-api/codex/responses). Leave empty to use the platform default.',
     getApiKey: 'Get API key',
     builtinModels: 'Built-in models: {{models}}',
     modelsMore: ' +{{count}} more',

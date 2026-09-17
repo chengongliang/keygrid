@@ -73,6 +73,22 @@ func TestBuildUpstreamBody(t *testing.T) {
 	if len(m["messages"].([]any)) != 1 {
 		t.Fatal("messages must survive rewrite")
 	}
+
+	// developer role（Responses/Codex 语义）→ system：无改名路径也必须归一化，
+	// 否则 DeepSeek 等 OpenAI 兼容上游会 400（unknown variant `developer`）
+	dev := []byte(`{"model":"m","messages":[{"role":"developer","content":"sys"},{"role":"user","content":"hi"}]}`)
+	got = buildUpstreamBody(dev, "m", "m")
+	var dm map[string]any
+	if err := json.Unmarshal(got, &dm); err != nil {
+		t.Fatalf("invalid json: %v", err)
+	}
+	dmsgs, _ := dm["messages"].([]any)
+	if dmsgs[0].(map[string]any)["role"] != "system" {
+		t.Fatalf("developer must become system: %s", got)
+	}
+	if dmsgs[1].(map[string]any)["role"] != "user" {
+		t.Fatalf("other roles must survive: %s", got)
+	}
 }
 
 // ---- 熔断状态机 ----

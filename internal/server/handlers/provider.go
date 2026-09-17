@@ -16,6 +16,7 @@ import (
 	"github.com/chengongliang/keygrid/internal/model"
 	"github.com/chengongliang/keygrid/internal/oauth"
 	"github.com/chengongliang/keygrid/internal/op"
+	"github.com/chengongliang/keygrid/internal/relay"
 	"github.com/chengongliang/keygrid/internal/server/middleware"
 	"github.com/chengongliang/keygrid/internal/server/resp"
 	"github.com/chengongliang/keygrid/internal/ssrf"
@@ -44,22 +45,31 @@ type createProviderReq struct {
 }
 
 // oauthDefaultBaseURL 各 oauth provider 的默认上游（oauth/presets.go ProviderPresets 单一事实来源）。
+// 显式条目只兜底 presets 里没有的 oauth provider（anthropic）；preset 存在时一律以
+// preset 为准 —— 历史遗留的 openai = https://chatgpt.com/backend-api 曾因「已占位不覆盖」
+// 被钉死，导致新建 Codex 渠道的 base_url 缺 /codex/responses 尾段（请求被 POST 到
+// 非 Responses 地址，客户端表现为流中断）。
 var oauthDefaultBaseURL = func() map[string]string {
 	m := map[string]string{
-		// 历史遗留：kimi 的 9router transport baseUrl（preset 里同值，这里显式保留）
-		"kimi":      "https://api.kimi.com/coding",
-		"openai":    "https://chatgpt.com/backend-api",
 		"anthropic": "https://api.anthropic.com",
 	}
 	for _, p := range oauth.ProviderPresets() {
 		if p.Kind == "oauth" {
-			if _, dup := m[p.Key]; !dup {
-				m[p.Key] = p.BaseURL
-			}
+			m[p.Key] = p.BaseURL
 		}
 	}
 	return m
 }()
+
+// normalizeOAuthBaseURL oauth 渠道 base_url 落库前归一化（写时归一化）：Codex（openai）
+// 渠道约定 base_url 为完整 Responses endpoint，历史默认值与手工填写常漏尾段，
+// 统一补全。relay 转发侧同样兜底（relay.NormalizeCodexBaseURL），存量渠道无需迁移。
+func normalizeOAuthBaseURL(kind, oauthProvider, baseURL string) string {
+	if kind == "oauth" && oauthProvider == "openai" {
+		return relay.NormalizeCodexBaseURL(baseURL)
+	}
+	return baseURL
+}
 
 // sortedOAuthKeys 已注册 oauth provider keys（排序稳定，错误提示用）。
 func sortedOAuthKeys() []string {
@@ -164,6 +174,7 @@ func (h *ProviderHandler) Create(w http.ResponseWriter, r *http.Request) {
 		if req.BaseURL == "" {
 			req.BaseURL = oauthDefaultBaseURL[req.OAuthProvider]
 		}
+		req.BaseURL = normalizeOAuthBaseURL(req.Kind, req.OAuthProvider, req.BaseURL)
 	default:
 		resp.BadRequest(w, "kind must be api_key or oauth")
 		return
@@ -410,7 +421,13 @@ func (h *ProviderHandler) Update(w http.ResponseWriter, r *http.Request) {
 			p.Name = *req.Name
 		}
 		if req.BaseURL != nil {
-			p.BaseURL = *req.BaseURL
+			b := *req.BaseURL
+			if b == "" && p.Kind == "oauth" {
+				// oauth 渠道编辑弹窗放开 base_url 后允许「清空恢复默认」，
+				// 不能把上游地址直接置空（渠道会彻底不可用）
+				b = oauthDefaultBaseURL[p.OAuthProvider]
+			}
+			p.BaseURL = normalizeOAuthBaseURL(p.Kind, p.OAuthProvider, b)
 		}
 		if req.Protocol != nil {
 			p.Protocol = *req.Protocol

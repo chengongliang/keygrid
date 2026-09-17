@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -256,7 +257,9 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 				lastErrMsg = "codex transform failed for " + cand.provider.Name + ": " + err.Error()
 				continue
 			}
-			target = strings.TrimRight(cand.provider.BaseURL, "/")
+			// 转发侧兜底归一化：存量错渠道（历史默认值缺 /codex/responses 尾段）
+			// 无需迁移数据即可恢复正常路由。
+			target = NormalizeCodexBaseURL(cand.provider.BaseURL)
 		case protoAnthropic:
 			upstreamBody, err = pivotToAnthropicRequest(req.Pivot, cand.upModel)
 			if err != nil {
@@ -310,6 +313,9 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 			var ue *UpstreamError
 			if errors.As(callErr, &ue) {
 				lastErrDetail = ue.Detail()
+			} else if d, ok := callErr.(interface{ Detail() string }); ok {
+				// 其他自带响应摘要的错误（如 codexNonSSEError）：摘要只回客户端
+				lastErrDetail = d.Detail()
 			}
 			// 只有已经向客户端提交了成功响应的流才不能 failover。
 			// status > 0 仅表示上游返回了 HTTP 状态，4xx/5xx 分支尚未
@@ -405,21 +411,55 @@ func (h *Handler) recordUsage(ctx context.Context, userID, apiKeyID, providerID 
 	_ = h.Op.FlushUsageBatch([]*model.UsageLog{ul}, map[int64]float64{ul.ApiKeyID: ul.Cost})
 }
 
-// buildUpstreamBody 把请求体里的模型名替换为上游名（保持其余字段原样）。
+// buildUpstreamBody 把请求体里的模型名替换为上游名，并把 developer role 归一化
+// 为 system（其余字段原样保留）。
+//
+// developer 来自 Responses API / OpenAI 新模型；Codex 客户端经 /v1/responses →
+// pivot 转换后常携带 developer 消息，而绝大多数 OpenAI 兼容上游（DeepSeek、GLM、
+// Kimi 等）的 role 枚举只有 system/user/assistant/tool，收到 developer 会 400
+// 拒绝整条请求。
 func buildUpstreamBody(original []byte, reqModel, upstreamModel string) []byte {
-	if reqModel == upstreamModel {
+	needModel := reqModel != upstreamModel
+	needRole := bytes.Contains(original, developerRoleToken)
+	if !needModel && !needRole {
 		return original
 	}
 	var m map[string]any
 	if err := json.Unmarshal(original, &m); err != nil {
 		return original
 	}
-	m["model"] = upstreamModel
+	if needRole {
+		normalizeDeveloperRoles(m)
+	}
+	if needModel {
+		m["model"] = upstreamModel
+	}
 	out, err := json.Marshal(m)
 	if err != nil {
 		return original
 	}
 	return out
+}
+
+// developerRoleToken developer role 的字节探测串：命中才做 JSON 重写，
+// 无 developer 的热路径零解析开销。
+var developerRoleToken = []byte(`"developer"`)
+
+// normalizeDeveloperRoles 把 messages[].role == "developer" 归一化为 "system"。
+func normalizeDeveloperRoles(body map[string]any) {
+	msgs, ok := body["messages"].([]any)
+	if !ok {
+		return
+	}
+	for _, mi := range msgs {
+		m, ok := mi.(map[string]any)
+		if !ok {
+			continue
+		}
+		if r, _ := m["role"].(string); r == "developer" {
+			m["role"] = "system"
+		}
+	}
 }
 
 // gatewayError 按入口协议返回错误体（openai/responses：{error:{...}}；

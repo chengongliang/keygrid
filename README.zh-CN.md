@@ -59,7 +59,7 @@ make web-dev   # 另一个终端: go run .
 
 - **API Key 类**：添加渠道 → 选预设模板（GLM/DeepSeek/硅基流动…自动填 base_url 和模型）或自定义 base_url → 粘贴你的 API Key → 保存 → 点「测连」确认绿灯；也可一键拉取上游模型列表勾选
 - **OAuth 类**（Kimi/Codex/Claude/iFlow/Qoder/Trae/CodeBuddy 订阅）：添加渠道 → 点「授权」→ 跳转/输入 user_code 完成授权 → 状态变 active（token 由平台自动续期，无需再管）
-  - **OpenAI Codex**：需 ChatGPT Plus/Pro 订阅。登录后浏览器会跳转到 `localhost:1455`（页面打不开属预期）——复制地址栏完整 URL 回平台粘贴即可完成授权。上游为 Responses 协议，网关已做 chat/completions ↔ responses 双向转换，照常走 `/v1`。
+  - **OpenAI Codex**：需 ChatGPT Plus/Pro 订阅。登录后浏览器会跳转到 `localhost:1455`（页面打不开属预期）——复制地址栏完整 URL 回平台粘贴即可完成授权。上游为 Responses 协议，网关已做 chat/completions ↔ responses 双向转换，照常走 `/v1`。选预设会自动填好上游地址（`https://chatgpt.com/backend-api/codex/responses`，必须指向完整 Responses endpoint）；如需自建/镜像端点，可在编辑渠道时改「上游地址」。
 - **需代理的站点**（如 OpenAI）：添加/编辑渠道时勾选「通过平台代理访问」即可（OpenAI 预设已默认勾选）；代理地址由管理员在系统设置统一配置，用户不可见不可改。未配置代理时该选项不展示。
 
 ### 第 2 步：签发平台 API Key
