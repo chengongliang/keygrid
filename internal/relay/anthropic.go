@@ -638,6 +638,7 @@ func (h *Handler) upstreamCallAnthropic(
 	clientStream bool,
 	entry string,
 	w http.ResponseWriter,
+	ua string,
 ) (int, UsageRecord, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, strings.NewReader(string(body)))
 	if err != nil {
@@ -647,6 +648,9 @@ func (h *Handler) upstreamCallAnthropic(
 		for _, v := range vs {
 			req.Header.Add(k, v)
 		}
+	}
+	if ua != "" {
+		req.Header.Set("User-Agent", ua)
 	}
 	if clientStream {
 		req.Header.Set("Accept", "text/event-stream")
@@ -660,7 +664,7 @@ func (h *Handler) upstreamCallAnthropic(
 
 	if upResp.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(upResp.Body, 4<<10))
-		return upResp.StatusCode, UsageRecord{}, &UpstreamError{Status: upResp.StatusCode, Body: string(b)}
+		return upResp.StatusCode, UsageRecord{}, &UpstreamError{Status: upResp.StatusCode, Body: string(b), ContentType: upResp.Header.Get("Content-Type")}
 	}
 
 	upModel := upModelFromBody(body)

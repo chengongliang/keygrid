@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Server, KeyRound, BarChart3, Users2, Gauge, SlidersHorizontal,
-  Settings, Menu, LogOut, ChevronRight, DollarSign,
+  Settings, Menu, LogOut, ChevronRight, DollarSign, Activity,
   PanelLeftClose, PanelLeftOpen,
 } from 'lucide-react'
 import Login from '@/pages/Login'
@@ -10,6 +10,7 @@ import ApiKeys from '@/pages/ApiKeys'
 import Usage from '@/pages/Usage'
 import SettingsPage from '@/pages/Settings'
 import AdminUsers from '@/pages/AdminUsers'
+import AdminProviders from '@/pages/AdminProviders'
 import AdminUsage from '@/pages/AdminUsage'
 import AdminPrices from '@/pages/AdminPrices'
 import AdminSettings from '@/pages/AdminSettings'
@@ -18,7 +19,7 @@ import { ThemeToggle } from '@/lib/theme'
 import { LanguageToggle } from '@/i18n/LanguageToggle'
 import { useTranslation } from 'react-i18next'
 
-type Tab = 'providers' | 'keys' | 'usage' | 'settings' | 'admin_users' | 'admin_usage' | 'admin_prices' | 'admin_settings'
+type Tab = 'providers' | 'keys' | 'usage' | 'settings' | 'admin_users' | 'admin_providers' | 'admin_usage' | 'admin_prices' | 'admin_settings'
 
 // 侧边栏分组导航（参考 dashboard 模板：分组标题 + 图标项 + 底部固定项）
 // label/title 存 i18n key，渲染处用 t() 转换（语言切换时重渲染生效）
@@ -43,6 +44,7 @@ const SECTION_ADMIN = [
     titleKey: 'app.sectionAdmin',
     items: [
       { key: 'admin_users' as Tab, labelKey: 'app.tabAdminUsers', icon: Users2 },
+      { key: 'admin_providers' as Tab, labelKey: 'app.tabAdminProviders', icon: Activity },
       { key: 'admin_usage' as Tab, labelKey: 'app.tabAdminUsage', icon: Gauge },
       { key: 'admin_prices' as Tab, labelKey: 'app.tabAdminPrices', icon: DollarSign },
       { key: 'admin_settings' as Tab, labelKey: 'app.tabAdminSettings', icon: SlidersHorizontal },
@@ -56,6 +58,7 @@ const TAB_KEY: Record<Tab, string> = {
   usage: 'app.tabUsage',
   settings: 'app.tabSettings',
   admin_users: 'app.tabAdminUsers',
+  admin_providers: 'app.tabAdminProviders',
   admin_usage: 'app.tabAdminUsage',
   admin_prices: 'app.tabAdminPrices',
   admin_settings: 'app.tabAdminSettings',
@@ -335,6 +338,7 @@ export default function App() {
             {activeTab === 'usage' && <Usage />}
             {activeTab === 'settings' && <SettingsPage user={user} onLogout={logout} />}
             {activeTab === 'admin_users' && <AdminUsers />}
+{activeTab === 'admin_providers' && <AdminProviders />}
             {activeTab === 'admin_usage' && <AdminUsage />}
             {activeTab === 'admin_prices' && <AdminPrices />}
             {activeTab === 'admin_settings' && <AdminSettings />}

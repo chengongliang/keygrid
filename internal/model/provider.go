@@ -21,6 +21,19 @@ type Provider struct {
 	// Enabled 无 default tag：GORM 会把带 default 的 bool 零值替换成默认值落库，
 	// 导致 oauth 渠道创建时的 Enabled=false（禁用直到授权）失效。创建路径显式赋值。
 	Enabled bool `json:"enabled"`
+	// BreakerCheck 该渠道是否参与熔断检测。默认 false（不熔断）：只有一条渠道的
+	// 用户宁可一直重试，也不希望渠道被临时拒绝 —— 熔断后没有备选可 failover，
+	// 等于整段不可用。not null + default:false 让 AutoMigrate 给存量行补 false
+	// （否则存量行为 NULL，扫描到 bool 字段会报错）。
+	BreakerCheck bool `gorm:"not null;default:false" json:"breaker_check"`
+	// UAMode 上游 User-Agent 策略：
+	//   ""（默认）→ 透传客户端 UA（上游看到真实客户端：pi-agent / codex / claude）；
+	//              Codex 渠道例外，保持固定 codex_cli_rs —— 上游强依赖该 UA。
+	//   "custom" → 用渠道自定义的 UserAgent；
+	//   "forward" → 强制透传客户端 UA（含 Codex 渠道）。
+	UAMode string `gorm:"not null;default:''" json:"ua_mode"`
+	// UserAgent UAMode=custom 时的 UA 值（禁 CR/LF，≤256）；其余模式忽略。
+	UserAgent string `gorm:"not null;default:''" json:"user_agent"`
 	// UseProxy 渠道上游请求是否走平台代理（管理员在系统设置统一配置 proxy_url，
 	// 用户只能勾选是否启用；如 OpenAI 需代理才能访问）。
 	UseProxy bool `json:"use_proxy"`

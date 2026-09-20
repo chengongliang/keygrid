@@ -110,24 +110,51 @@ func TestBuildUpstreamBody(t *testing.T) {
 
 // ---- 熔断状态机 ----
 
-func TestCircuitBreaker(t *testing.T) {
+// 渠道级开关：熔断检测默认关闭（nil / 零值都不参与），只有显式开启才生效。
+func TestBreakerCheckEnabled(t *testing.T) {
+	if breakerCheckEnabled(nil) {
+		t.Fatal("nil provider must not enable breaker check")
+	}
+	if breakerCheckEnabled(&model.Provider{}) {
+		t.Fatal("zero value must default to disabled（默认否）")
+	}
+	if !breakerCheckEnabled(&model.Provider{BreakerCheck: true}) {
+		t.Fatal("explicitly enabled must be detected")
+	}
+}
+
+// fakeClock 可推进的测试时钟（滑动窗口 / 探测租约都需要穿越时间）。
+type fakeClock struct{ t time.Time }
+
+func (c *fakeClock) now() time.Time          { return c.t }
+func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
+
+func newTestState() (*State, *fakeClock) {
+	c := &fakeClock{t: time.Unix(1700000000, 0)}
 	st := NewState()
+	st.now = c.now
+	return st, c
+}
+
+func TestCircuitBreaker(t *testing.T) {
+	st, clk := newTestState()
 	for i := 0; i < defaultFailThreshold; i++ {
 		st.OnFailure()
 	}
 	if state, _ := st.Snapshot(); state != "open" {
 		t.Fatalf("expected open after %d failures, got %s", defaultFailThreshold, state)
 	}
-	if st.Allow() {
+	if ok, _ := st.Allow(); ok {
 		t.Fatal("open breaker must reject")
 	}
 
-	// 到期 → half-open，放行 1 个试探
-	st.openedAt = st.openedAt.Add(-defaultOpenDuration - time.Second)
-	if !st.Allow() {
-		t.Fatal("half-open must allow one probe")
+	// 到期 → half-open，放行 1 个试探（带探测令牌）
+	clk.advance(defaultOpenDuration + time.Second)
+	ok, probe := st.Allow()
+	if !ok || probe == 0 {
+		t.Fatalf("half-open must allow one probe with token, got ok=%v token=%d", ok, probe)
 	}
-	if st.Allow() {
+	if ok, _ := st.Allow(); ok {
 		t.Fatal("half-open must allow only one probe")
 	}
 	st.OnSuccess()
@@ -136,16 +163,14 @@ func TestCircuitBreaker(t *testing.T) {
 	}
 
 	// half-open 试探失败 → 重新 open
-	// 构造：先熔断 → 到期进入 half-open → Allow() 取得试探资格 → 试探失败
-	st.OnFailure() // failures=1
-	for i := 1; i < defaultFailThreshold; i++ {
+	for i := 0; i < defaultFailThreshold; i++ {
 		st.OnFailure()
 	}
 	if state, _ := st.Snapshot(); state != "open" {
 		t.Fatalf("precondition: expected open, got %s", state)
 	}
-	st.openedAt = st.openedAt.Add(-defaultOpenDuration - time.Second)
-	if !st.Allow() {
+	clk.advance(defaultOpenDuration + time.Second)
+	if ok, _ := st.Allow(); !ok {
 		t.Fatal("half-open must allow probe")
 	}
 	st.OnFailure() // probe fails → re-trip
@@ -154,16 +179,105 @@ func TestCircuitBreaker(t *testing.T) {
 	}
 }
 
+// 滑动窗口：滑出窗口的旧失败不再凑阈值（旧实现是累计计数，跨小时的零星失败也能熔断）。
+func TestCircuitBreakerSlidingWindow(t *testing.T) {
+	st, clk := newTestState()
+	st.OnFailure()
+	st.OnFailure()
+	clk.advance(defaultFailWindow + time.Second) // 前两条滑出窗口
+	st.OnFailure()
+	st.OnFailure()
+	if state, fails := st.Snapshot(); state != "closed" || fails != 2 {
+		t.Fatalf("stale failures must not count, got state=%s fails=%d", state, fails)
+	}
+	// 窗口内凑满阈值 → 熔断
+	for i := 0; i < defaultFailThreshold-2; i++ {
+		st.OnFailure()
+	}
+	if state, _ := st.Snapshot(); state != "open" {
+		t.Fatalf("expected open, got %s", state)
+	}
+}
+
+// 探测租约：调用方漏归还（历史缺陷：客户端断开/凭据失效路径直接 return）
+// 不能让渠道永久卡在 half-open。
+func TestCircuitBreakerProbeLease(t *testing.T) {
+	st, clk := newTestState()
+	for i := 0; i < defaultFailThreshold; i++ {
+		st.OnFailure()
+	}
+	clk.advance(defaultOpenDuration + time.Second)
+
+	ok, probe := st.Allow()
+	if !ok || probe == 0 {
+		t.Fatal("half-open must allow probe")
+	}
+	if ok, _ := st.Allow(); ok {
+		t.Fatal("in-flight probe must block other requests")
+	}
+	// 租约到期 → 探测蒸发，重新签发（渠道不会永久不可用）
+	clk.advance(defaultProbeTimeout + time.Second)
+	ok, probe2 := st.Allow()
+	if !ok || probe2 == 0 || probe2 == probe {
+		t.Fatalf("expired lease must re-issue a probe, got ok=%v token=%d/%d", ok, probe2, probe)
+	}
+	// 晚到的旧探测归还不能误伤在途的新探测
+	st.ReleaseOne(probe)
+	if ok, _ := st.Allow(); ok {
+		t.Fatal("stale release must not free the live probe")
+	}
+	st.OnSuccess()
+	if state, _ := st.Snapshot(); state != "closed" {
+		t.Fatalf("expected closed, got %s", state)
+	}
+}
+
+// 探测资格显式归还后，下一个请求可以立刻再试探（不必等租约到期）。
+func TestCircuitBreakerProbeRelease(t *testing.T) {
+	st, clk := newTestState()
+	for i := 0; i < defaultFailThreshold; i++ {
+		st.OnFailure()
+	}
+	clk.advance(defaultOpenDuration + time.Second)
+
+	ok, probe := st.Allow()
+	if !ok || probe == 0 {
+		t.Fatal("half-open must allow probe")
+	}
+	st.ReleaseOne(probe)
+	if ok, probe2 := st.Allow(); !ok || probe2 == probe || probe2 == 0 {
+		t.Fatalf("released probe must allow a fresh one, got ok=%v token=%d", ok, probe2)
+	}
+}
+
 func TestBreakerRegistry(t *testing.T) {
 	b := NewBreaker()
 	for i := 0; i < defaultFailThreshold; i++ {
 		b.OnFailure(42)
 	}
-	if b.Allow(42) {
+	if ok, _ := b.Allow(42); ok {
 		t.Fatal("channel 42 should be open")
 	}
-	if !b.Allow(43) {
+	if ok, _ := b.Allow(43); !ok {
 		t.Fatal("channel 43 should be independent")
+	}
+}
+
+// Reset 手动恢复（admin 重置熔断）。
+func TestBreakerReset(t *testing.T) {
+	b := NewBreaker()
+	for i := 0; i < defaultFailThreshold; i++ {
+		b.OnFailure(7)
+	}
+	if ok, _ := b.Allow(7); ok {
+		t.Fatal("channel 7 should be open")
+	}
+	b.Reset(7)
+	if ok, _ := b.Allow(7); !ok {
+		t.Fatal("reset must close the breaker")
+	}
+	if b.SnapshotByID(7) != "closed" {
+		t.Fatalf("snapshot after reset = %s", b.SnapshotByID(7))
 	}
 }
 
@@ -218,6 +332,68 @@ func TestShouldFailover(t *testing.T) {
 	}
 	if shouldFailover(200, nil) || shouldFailover(400, nil) {
 		t.Fatal("2xx/4xx(非429) must not failover")
+	}
+}
+
+// 熔断只认渠道/网络层面的故障：4xx 是坏请求/坏凭据，不该把渠道打死。
+func TestChannelFailureClassification(t *testing.T) {
+	// 4xx（除 429）：failover 但绝不熔断
+	for _, s := range []int{400, 401, 403, 404, 413, 422} {
+		if channelFailure(&UpstreamError{Status: s}, s) {
+			t.Fatalf("%d must not trip the breaker", s)
+		}
+	}
+	// 429 / 5xx：熔断
+	if !channelFailure(&UpstreamError{Status: 429}, 429) {
+		t.Fatal("429 must trip the breaker")
+	}
+	for _, s := range []int{500, 502, 503, 504} {
+		if !channelFailure(&UpstreamError{Status: s}, s) {
+			t.Fatalf("%d must trip the breaker", s)
+		}
+	}
+	// 传输层错误（连接失败、超时、上游中断读流）
+	if !channelFailure(context.DeadlineExceeded, 0) {
+		t.Fatal("timeout must trip the breaker")
+	}
+	if !channelFailure(errors.New("read upstream: connection reset by peer"), 200) {
+		t.Fatal("interrupted stream must trip the breaker")
+	}
+	// 无 error 时退回 shouldFailover 语义
+	if channelFailure(nil, 400) || !channelFailure(nil, 503) {
+		t.Fatal("status-only classification must follow shouldFailover")
+	}
+}
+
+// 端到端锁定：上游返回非 2xx 时 upstreamCall 产出的错误必须被正确分类。
+// 旧行为把任意 4xx 也当渠道故障，一个被反复重试的坏请求几秒内就能把渠道熔断。
+func TestUpstreamErrorClassificationE2E(t *testing.T) {
+	h := &Handler{HTTPClient: newUpstreamClient(5 * time.Second)}
+	cases := []struct {
+		status   int
+		wantTrip bool
+	}{
+		{400, false}, {401, false}, {404, false}, {413, false},
+		{429, true}, {500, true}, {503, true},
+	}
+	for _, tc := range cases {
+		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(tc.status)
+			_, _ = w.Write([]byte(`{"error":{"message":"boom"}}`))
+		}))
+		w := httptest.NewRecorder()
+		body := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+		status, _, err := h.upstreamCall(t.Context(), h.HTTPClient, up.URL, "sk-x", body, false, protoOpenAI, w, "")
+		up.Close()
+		if err == nil {
+			t.Fatalf("upstream %d must produce an error", tc.status)
+		}
+		if status != tc.status {
+			t.Fatalf("upstream %d: returned status %d", tc.status, status)
+		}
+		if got := channelFailure(err, status); got != tc.wantTrip {
+			t.Fatalf("upstream %d: channelFailure=%v, want %v", tc.status, got, tc.wantTrip)
+		}
 	}
 }
 

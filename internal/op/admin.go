@@ -249,6 +249,7 @@ type ProviderHealthRow struct {
 	Kind          string     `json:"kind"`
 	Protocol      string     `json:"protocol"`
 	Enabled       bool       `json:"enabled"`
+	BreakerCheck  bool       `json:"breaker_check"`
 	CredStatus    string     `json:"cred_status"`
 	CredExpiresAt *time.Time `json:"cred_expires_at"`
 	LastError     string     `json:"last_error"`
@@ -262,22 +263,32 @@ type ProviderHealthRow struct {
 }
 
 // ListProviderHealth 全部渠道健康概览（按 user_id + name 排序）。
-func (o *Op) ListProviderHealth() ([]ProviderHealthRow, error) {
+func (o *Op) ListProviderHealth() ([]ProviderHealthRow, error) { return o.listProviderHealth(0) }
+
+// ListProviderHealthForUser 用户端渠道可用性：只含该用户自己的渠道（数据隔离硬性规则）。
+// 与 admin 版共用同一查询与 24h 聚合口径，保证两端看到同样的数字。
+func (o *Op) ListProviderHealthForUser(userID int64) ([]ProviderHealthRow, error) {
+	return o.listProviderHealth(userID)
+}
+
+// listProviderHealth userID > 0 时限定该用户的渠道；0 = 全平台（admin）。
+func (o *Op) listProviderHealth(userID int64) ([]ProviderHealthRow, error) {
 	var rows []ProviderHealthRow
-	err := o.DB.Table("providers p").
+	q := o.DB.Table("providers p").
 		Select(
-			"p.id as id, p.user_id as user_id, COALESCE(u.email,'') as user_email, p.name as name, p.kind as kind, p.protocol as protocol, p.enabled as enabled, " +
+			"p.id as id, p.user_id as user_id, COALESCE(u.email,'') as user_email, p.name as name, p.kind as kind, p.protocol as protocol, p.enabled as enabled, p.breaker_check as breaker_check, " +
 				"COALESCE(c.status,'') as cred_status, c.expires_at as cred_expires_at, COALESCE(c.last_error,'') as last_error",
 		).
 		Joins("JOIN users u ON u.id = p.user_id").
-		Joins("LEFT JOIN credentials c ON c.provider_id = p.id").
-		Order("p.user_id ASC, p.id ASC").
-		Scan(&rows).Error
-	if err != nil {
+		Joins("LEFT JOIN credentials c ON c.provider_id = p.id")
+	if userID > 0 {
+		q = q.Where("p.user_id = ?", userID)
+	}
+	if err := q.Order("p.user_id ASC, p.id ASC").Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 
-	// 近 24h 聚合：一条 SQL 按 provider_id 汇总
+	// 近 24h 聚合：一条 SQL 按 provider_id 汇总（用户端同样按 user_id 收窄，避免全表聚合）
 	type aggRow struct {
 		ProviderID int64
 		Requests   int64
@@ -285,11 +296,13 @@ func (o *Op) ListProviderHealth() ([]ProviderHealthRow, error) {
 		AvgLatency float64
 	}
 	var aggs []aggRow
-	if err := o.DB.Model(&model.UsageLog{}).
+	aggQ := o.DB.Model(&model.UsageLog{}).
 		Select("provider_id, COUNT(*) as requests, COUNT(*) FILTER (WHERE status_code >= 400) as failed, COALESCE(AVG(latency_ms),0) as avg_latency").
-		Where("created_at > NOW() - INTERVAL '24 hours'").
-		Group("provider_id").
-		Scan(&aggs).Error; err != nil {
+		Where("created_at > NOW() - INTERVAL '24 hours'")
+	if userID > 0 {
+		aggQ = aggQ.Where("user_id = ?", userID)
+	}
+	if err := aggQ.Group("provider_id").Scan(&aggs).Error; err != nil {
 		return nil, err
 	}
 	aggMap := make(map[int64]aggRow, len(aggs))

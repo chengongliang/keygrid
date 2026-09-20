@@ -10,6 +10,8 @@ import adminUsers from './adminUsers'
 import adminUsage from './adminUsage'
 import adminPrices from './adminPrices'
 import adminSettings from './adminSettings'
+import adminProviders from './adminProviders'
+import requestErrors from './requestErrors'
 
 export default {
   common,
@@ -23,4 +25,6 @@ export default {
   adminUsage,
   adminPrices,
   adminSettings,
+  adminProviders,
+  requestErrors,
 }

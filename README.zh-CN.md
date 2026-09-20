@@ -24,10 +24,12 @@
 - 🌐 **OAuth 订阅类渠道**：Kimi（device_code）、OpenAI/Codex（pkce）、Anthropic/Claude、iFlow、Qoder、Trae、CodeBuddy，平台内完成授权 + token 自动刷新（提前 5 分钟）
 - 📋 **渠道预设**：GLM、DeepSeek、SiliconFlow、火山方舟、千帆、混元、小米 MiMo、MiniMax 等开箱模板（自动填 base_url + 模型目录），添加渠道时可拉取上游模型列表直接勾选
 - 🛡 **出口代理**：管理员在系统设置统一配置（http/https/socks5），用户仅在渠道上勾选是否启用 —— OpenAI 等需代理站点默认勾选；转发、OAuth 授权/刷新、测连、模型拉取全路径生效
-- 🔀 **智能路由**：model_map 映射、priority 优先级、多渠道 failover、连续失败熔断 30s
+- 🔀 **智能路由**：model_map 映射、priority 优先级、多渠道 failover、渠道级熔断开关（默认关；开启后 30s 内 5 次渠道层失败熔断 30s）
+- 🩺 **渠道健康视图**：渠道页一键在「卡片 / 健康」间切换 —— 24h 请求/失败/成功率/平均延迟、熔断状态与手动重置、行内快速启停；点开任意渠道即可看最近失败详情（失败分类 + 上游错误摘要，保留 7 天，只记元数据不落 prompt/响应正文）
+- 🎭 **上游 UA 策略**：默认把客户端 User-Agent 原样透传（上游看到真实客户端：pi-agent / codex / claude…），也可按渠道固定自定义值；Codex 渠道默认保持 codex_cli_rs（上游强依赖）
 - 🔌 **多协议入口**：同时暴露 OpenAI `/v1/chat/completions`、Anthropic `/v1/messages`、OpenAI Responses `/v1/responses` 三套客户端协议 —— Claude Code / OpenAI SDK / Responses SDK 任意接入，协议在网关内双向转换路由到你的任意渠道（详见下方「多协议入口」）
 - 📊 **用量统计**：按日/模型/Key 聚合、分时热力图、时间范围筛选，SSE 流式记账，/v1/models 聚合本人可用模型
-- 👥 **管理后台**：用户管理（禁用/重置密码/角色调整）、全平台用量看板（CSV 导出）、渠道健康总览、公告/维护模式、注册策略（开放/邀请码/关闭）
+- 👥 **管理后台**：用户管理（禁用/重置密码/角色调整）、全平台用量看板（CSV 导出）、渠道健康总览（含熔断状态、手动重置与失败详情下钻）、公告/维护模式、注册策略（开放/邀请码/关闭）
 - 🔐 **OIDC SSO**：Keycloak/Okta/Authentik 等标准 OIDC IdP 单点登录（JIT 自动建号），管理端热配置、保存即生效
 - 🔒 **安全**：供应商凭据 AES-GCM 加密落库；平台 API Key 存 sha256 哈希（鉴权）+ AES-GCM 密文副本（“查看/复制”按需解密回显，落库不留明文）——`MASTER_KEY` 同时解锁供应商凭据与全部已签发 Key，务必妥善保管。可配 IP 白名单/可用模型限制、SSRF 私网拒绝（含 DNS rebinding 防护）、登录限速（5 次/分钟/IP）、审计日志、CORS 白名单
 

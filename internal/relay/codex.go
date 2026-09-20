@@ -1103,6 +1103,7 @@ func (h *Handler) upstreamCallCodex(
 	entry string,
 	w http.ResponseWriter,
 	provider *model.Provider,
+	ua string,
 ) (int, UsageRecord, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, strings.NewReader(string(body)))
 	if err != nil {
@@ -1112,6 +1113,11 @@ func (h *Handler) upstreamCallCodex(
 		for _, v := range vs {
 			req.Header.Add(k, v)
 		}
+	}
+	// UA 策略：默认（ua 为空）保持 codexUpstreamHeaders 的固定 codex_cli_rs；
+	// 渠道显式配 custom/forward 时覆盖（上游强依赖该头，谨慎使用）。
+	if ua != "" {
+		req.Header.Set("User-Agent", ua)
 	}
 
 	upResp, err := client.Do(req)
@@ -1129,7 +1135,7 @@ func (h *Handler) upstreamCallCodex(
 
 	if upResp.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(upResp.Body, 4<<10))
-		return upResp.StatusCode, UsageRecord{}, &UpstreamError{Status: upResp.StatusCode, Body: string(b)}
+		return upResp.StatusCode, UsageRecord{}, &UpstreamError{Status: upResp.StatusCode, Body: string(b), ContentType: upResp.Header.Get("Content-Type")}
 	}
 
 	// Codex 偶尔以 HTTP 200 返回流内过载/容量错误。必须在写客户端响应头前

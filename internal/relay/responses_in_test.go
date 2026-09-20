@@ -321,7 +321,7 @@ func TestUpstreamOpenAIEntryResponsesNonStream(t *testing.T) {
 
 	h := NewHandler(nil)
 	w := httptest.NewRecorder()
-	status, usage, err := h.upstreamCall(t.Context(), h.HTTPClient, up.URL+"/v1/chat/completions", "sk", upBody, false, protoResponses, w)
+	status, usage, err := h.upstreamCall(t.Context(), h.HTTPClient, up.URL+"/v1/chat/completions", "sk", upBody, false, protoResponses, w, "")
 	if err != nil {
 		t.Fatalf("upstreamCall: %v", err)
 	}
@@ -368,7 +368,7 @@ func TestUpstreamOpenAIEntryMessagesNonStream(t *testing.T) {
 
 	h := NewHandler(nil)
 	w := httptest.NewRecorder()
-	status, usage, err := h.upstreamCall(t.Context(), h.HTTPClient, up.URL, "sk", upBody, false, protoAnthropic, w)
+	status, usage, err := h.upstreamCall(t.Context(), h.HTTPClient, up.URL, "sk", upBody, false, protoAnthropic, w, "")
 	if err != nil {
 		t.Fatalf("upstreamCall: %v", err)
 	}
@@ -445,7 +445,7 @@ func TestUpstreamCodexResponsesEntryPassthrough(t *testing.T) {
 	body, _ := BuildCodexRequest([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`), "gpt-5.4")
 	h := NewHandler(nil)
 	w := httptest.NewRecorder()
-	status, usage, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, up.URL, "tok", "", body, true, protoResponses, w, nil)
+	status, usage, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, up.URL, "tok", "", body, true, protoResponses, w, nil, "")
 	if err != nil {
 		t.Fatalf("passthrough: %v", err)
 	}

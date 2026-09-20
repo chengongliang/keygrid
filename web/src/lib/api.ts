@@ -54,6 +54,12 @@ export interface Provider {
   enabled: boolean
   /** 上游请求是否走平台代理（代理地址由管理员在系统设置统一配置） */
   use_proxy?: boolean
+  /** 是否参与熔断检测（默认 false = 不熔断；只有一条不稳定渠道时建议保持关闭） */
+  breaker_check?: boolean
+  /** 上游 UA 策略：''（默认透传客户端）/ custom / forward */
+  ua_mode?: string
+  /** ua_mode=custom 时的 UA 值 */
+  user_agent?: string
   /** 授权标记：api_key 恒 true；oauth = 已完成授权（有 active 凭据）。未授权渠道显示"待授权"。 */
   authorized?: boolean
   created_at: string
@@ -317,6 +323,7 @@ export interface ProviderHealthRow {
   kind: string
   protocol: string
   enabled: boolean
+  breaker_check: boolean
   cred_status: string
   cred_expires_at?: string | null
   last_error: string
@@ -325,6 +332,23 @@ export interface ProviderHealthRow {
   success_rate: number
   avg_latency_ms: number
   breaker_state: string
+}
+
+/** 失败请求详情（渠道健康视图的排查数据；保留 7 天，单渠道每分钟最多 30 条采样） */
+export interface RequestErrorRow {
+  id: number
+  provider_id: number
+  provider_name: string
+  api_key_name: string
+  model: string
+  /** 失败分类：no_channel / circuit_open / credential / transform / proxy /
+   *  upstream_4xx / upstream_429 / upstream_5xx / transport / stream_aborted */
+  kind: string
+  status_code: number
+  /** 上游错误摘要（已截断；不含 prompt 与响应正文） */
+  message: string
+  latency_ms: number
+  created_at: string
 }
 
 // ---- OIDC SSO 系统设置（参考 new-api：管理员动态配置，保存即热生效）----

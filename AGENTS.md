@@ -52,12 +52,14 @@ internal/
   db/                       # 连接与迁移
   httpx/                    # HTTP 客户端封装(超时/代理)
   ssrf/                     # SSRF 防护(私网拒绝、DNS rebinding 防护)
-  model/                    # GORM 实体:user, provider, credential, apikey, usage_log...
+  model/                    # GORM 实体:user, provider, credential, apikey, usage_log, request_error(失败诊断)...
   op/                       # 数据操作层(CRUD+缓存),op.go 是主入口;所有查询在此强制带 user_id
   relay/                    # ★ 转发引擎
     handler.go              #   三入口骨架(chat/messages/responses)、failover 主循环
     route.go                #   用户内渠道路由(model_map、priority、failover)
-    state.go                #   熔断状态机(连续失败熔断 30s)
+    state.go                #   熔断状态机(滑动窗口 + half-open 探测租约;渠道级开关 breaker_check,默认关)
+    reqerr.go               #   失败诊断(request_errors):失败分类 + 上游错误摘要提取 + 异步批量落库
+    ua.go                   #   上游 UA 策略(默认透传客户端;custom/forward,Codex 渠道例外)
     protocol.go             #   openai 上游调用 + SSE 透传 + 通用 usage 提取
     codex.go                #   chat/completions ↔ responses 双向协议转换
     anthropic.go            #   anthropic messages ↔ pivot 双向协议转换
@@ -73,7 +75,7 @@ internal/
   oidc/                     # OIDC SSO(JWKS 缓存、PKCE、JIT 建号)
   oidc.go 相关状态存储见 model/oidc_state.go
   server/                   # HTTP 层
-    handlers/               #   用户端 + 管理端 handler(admin_*.go)
+    handlers/               #   用户端 + 管理端 handler(admin_*.go;provider_health.go = 用户端渠道可用性)
     middleware/             #   auth、cors、RequireRole 等
     resp/                   #   统一响应格式
     router/router.go        #   路由表
@@ -82,7 +84,7 @@ web/                        # React SPA(构建产物 dist/ 被 Go embed;仓库�
                             #   保证 fresh clone 可直接 go build/go test)
   src/i18n/                 # react-i18next:index.ts 初始化 + LanguageToggle;locales/{zh-CN,en}/<域>.ts 各域字典
   src/pages/                #   每个页面一个文件:Providers / ApiKeys / Usage / Login / Settings / Admin*
-  src/components/           #   ProviderLogo、usage-charts 等
+  src/components/           #   ProviderLogo、usage-charts、provider-errors(失败详情)、providers-health-view 等
   src/lib/api.ts            #   fetch 封装(统一鉴权/错误处理)
   public/logos/             #   供应商图标素材(来源与商标声明见 docs/provider-logos.md)
 scripts/                    # 备份恢复、E2E 脚本、mock 服务(mock_kimi_oauth.py、mock_oidc.py)
@@ -99,7 +101,7 @@ THIRD_PARTY_NOTICES.md      # 第三方代码/素材来源与许可声明(9route
 1. **数据隔离**:所有对 `providers / credentials / api_keys / usage_logs` 的读写必须带 `WHERE user_id = 当前用户`。新查询一律封装进 `op/` 层,不要在 handler 里直接写 GORM 查询绕过隔离。relay 路由只能在 `user_id = token.user_id` 的渠道池里选。
 2. **凭据加密**:供应商凭据 AES-GCM 加密落库(`crypto/`),任何代码路径不得明文落库、不得写入日志。admin 也只能看状态,不能读凭据明文。
 3. **API Key 存储**:平台签发的 `sk-` key 存 sha256 哈希(鉴权)+ AES-GCM 加密的明文副本(支持"查看/复制"按需解密回显),落库不留明文;`MASTER_KEY` 属最高敏感配置——它同时解锁供应商凭据与全部已签发 key,不得泄露或写入日志。
-4. **日志不落内容**:usage/审计日志只记元数据(模型、tokens、状态码、延迟),不落 prompt 与响应内容。
+4. **日志不落内容**:usage/审计日志只记元数据(模型、tokens、状态码、延迟),不落 prompt 与响应内容。失败诊断(`request_errors`)同样只落元数据 + 上游错误摘要 —— 只从上游 JSON 里提取 `error.message/code/type`(截断 512),非 JSON 正文只记 content-type 与字节数,**绝不落 body 原文**(上游错误体可能回显 prompt 片段)。
 5. **SSRF 防护**:任何接受用户输入 URL 的功能(base_url、测连、模型拉取)必须经过 `ssrf/` 包校验。
 6. **OAuth 安全**:state 一次性 + 5min 过期;refresh_token 单次使用型 provider 必须在 Redis 锁内原子完成「换新→落库」。
 7. `.env` 含真实密钥,永远不提交;新增配置项时同步更新 `.env.example`。

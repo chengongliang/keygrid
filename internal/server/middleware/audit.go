@@ -35,6 +35,11 @@ const (
 	AuditEventAdminPriceDelete = "admin.price_delete"
 	AuditEventAdminPriceSync   = "admin.price_sync"
 
+	// 渠道健康：熔断手动重置留痕
+	AuditEventAdminBreakerReset = "admin.provider_breaker_reset"
+	// 用户自己重置自己渠道的熔断（自愈：换 key / 上游恢复后）
+	AuditEventProviderBreakerReset = "provider.breaker_reset"
+
 	// OIDC SSO 登录留痕
 	AuditEventOidcLoginOK   = "user.oidc_login"
 	AuditEventOidcLoginFail = "user.oidc_login_fail"

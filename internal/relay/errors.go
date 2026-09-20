@@ -9,6 +9,8 @@ import "fmt"
 type UpstreamError struct {
 	Status int
 	Body   string
+	// ContentType 上游响应 Content-Type（仅用于把错误归类成可读摘要，不参与落库正文）
+	ContentType string
 }
 
 func (e *UpstreamError) Error() string {

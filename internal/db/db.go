@@ -57,6 +57,7 @@ func Migrate(gormDB *gorm.DB) error {
 		&model.OidcState{},     // OIDC SSO 一次性 state
 		&model.ModelPrice{},    // 计费：admin 全局模型价格表
 		&model.QuotaSnapshot{}, // 额度快照（openai codex /wham/usage 同步结果）
+		&model.RequestError{},  // 失败请求诊断详情（默认保留 7 天，后台任务清理）
 	); err != nil {
 		return err
 	}

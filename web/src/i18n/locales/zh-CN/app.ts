@@ -10,6 +10,7 @@ const app = {
   tabUsage: '用量',
   tabSettings: '设置',
   tabAdminUsers: '用户管理',
+  tabAdminProviders: '渠道健康',
   tabAdminUsage: '平台用量',
   tabAdminPrices: '模型定价',
   tabAdminSettings: '系统设置',

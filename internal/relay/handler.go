@@ -31,6 +31,8 @@ type Handler struct {
 	Breaker    *Breaker
 	Limiter    *RateLimiter
 	Usage      *UsageWriter
+	// ErrSink 失败诊断异步写入器（nil = 同步落库）
+	ErrSink *ErrorWriter
 	// Pricing 模型价格缓存（计费；nil = 不计费，cost=0）
 	Pricing *Pricing
 	// Quota key 级额度硬限额（计费；nil = 不拦截）
@@ -74,6 +76,9 @@ func (h *Handler) SetRateLimiter(rl *RateLimiter) { h.Limiter = rl }
 
 // SetUsageWriter 注入异步记账器（nil 则退化为同步写）。
 func (h *Handler) SetUsageWriter(uw *UsageWriter) { h.Usage = uw }
+
+// SetErrorWriter 注入失败诊断异步写入器（nil 则退化为同步写）。
+func (h *Handler) SetErrorWriter(ew *ErrorWriter) { h.ErrSink = ew }
 
 // SetPricing 注入价格缓存（计费；nil = 不计费）。
 func (h *Handler) SetPricing(p *Pricing) { h.Pricing = p }
@@ -165,6 +170,8 @@ func (h *Handler) relayEntry(w http.ResponseWriter, r *http.Request, entry strin
 func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string, req relayRequest, start time.Time) {
 	userID := middleware.UserID(r.Context())
 	apiKeyID := middleware.APIKeyID(r.Context())
+	// 客户端 UA：默认策略下透传给上游（渠道可改为固定/自定义，见 ua.go）
+	clientUA := r.Header.Get("User-Agent")
 
 	// key 级限制：模型白名单（ModelLimit）+ 渠道白名单（ProviderLimit），二者均空 = 不限
 	apiKeyObj := middleware.APIKeyObj(r.Context())
@@ -196,6 +203,7 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 	// 1. 在 user 自己的渠道池里构建候选（priority 降序 + 同级随机；key 渠道白名单过滤）
 	ps, err := h.Op.ListProviders(userID)
 	if err != nil {
+		h.noteFailure(userID, apiKeyID, 0, req.Model, errKindNoChannel, 0, "list providers failed: "+err.Error(), start)
 		gatewayError(w, entry, http.StatusServiceUnavailable, "no available channel for model "+req.Model)
 		return
 	}
@@ -204,9 +212,13 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 		// 绑定了渠道但白名单内没有可用候选：403 比 503 更能提示是 key 绑定导致
 		// （渠道被禁用/删除，或绑定渠道均不支持该模型）
 		if len(allowedProviders) > 0 {
+			h.noteFailure(userID, apiKeyID, 0, req.Model, errKindNoChannel, http.StatusForbidden,
+				"no bound channel of this api key serves model "+req.Model, start)
 			gatewayError(w, entry, http.StatusForbidden, "no bound channel of this api key serves model "+req.Model)
 			return
 		}
+		h.noteFailure(userID, apiKeyID, 0, req.Model, errKindNoChannel, http.StatusServiceUnavailable,
+			"no available channel for model "+req.Model+" (no channel serves it, or all are disabled)", start)
 		gatewayError(w, entry, http.StatusServiceUnavailable, "no available channel for model "+req.Model)
 		return
 	}
@@ -216,26 +228,56 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 	var lastErrMsg string
 	// 上游正文摘要仅回传客户端，不写日志（Error() 本身已不含正文，见 UpstreamError）
 	var lastErrDetail string
+	// 一次请求内同一渠道最多计一次熔断失败：failover 会把同一个请求打到多条渠道，
+	// 去重避免重复计数把单个坏请求放大成多条渠道的熔断
+	failedChannels := map[int64]bool{}
+	breakerFail := func(p *model.Provider) {
+		if !breakerCheckEnabled(p) {
+			return // 未开启熔断检测：只 failover，不累计任何失败
+		}
+		if failedChannels[p.ID] {
+			return
+		}
+		failedChannels[p.ID] = true
+		h.Breaker.OnFailure(p.ID)
+	}
 	for _, cand := range cands {
-		if !h.Breaker.Allow(cand.provider.ID) {
-			lastErrMsg = "channel " + cand.provider.Name + " circuit open"
-			continue
+		// 熔断检测按渠道开关（默认关）：未开启时既不做放行检查、也不消耗探测租约，
+		// 未开启熔断检测的渠道永远放行。
+		if breakerCheckEnabled(cand.provider) {
+			allow, probe := h.Breaker.Allow(cand.provider.ID)
+			if probe != 0 {
+				// half-open 探测租约：本次渠道尝试无论是成功、失败、客户端断开、
+				// 凭据失效还是 continue 到下一候选，都要归还探测资格。漏掉归还时
+				// 该渠道会一直卡在 half-open（Allow 恒为 false），后续请求全部
+				// “circuit open” —— 直到租约（ProbeTimeout）超时自动蒸发。
+				defer h.Breaker.ReleaseOne(cand.provider.ID, probe)
+			}
+			if !allow {
+				lastErrMsg = "channel " + cand.provider.Name + " circuit open"
+				h.noteFailure(userID, apiKeyID, cand.provider.ID, req.Model, errKindCircuitOpen, 0,
+					"circuit open: tripped by consecutive failures (reset it from the channel health view)", start)
+				continue
+			}
 		}
 
 		cred, err := h.Op.GetCredentialByProviderID(cand.provider.ID)
 		if err != nil {
-			h.Breaker.OnFailure(cand.provider.ID)
+			breakerFail(cand.provider)
 			lastErrMsg = "credential missing for " + cand.provider.Name
+			h.noteFailure(userID, apiKeyID, cand.provider.ID, req.Model, errKindCredential, 0, lastErrMsg, start)
 			continue
 		}
 		apiKey, tokenExtra, credStatus, err := h.credentialSecret(r.Context(), cred, cand.provider)
 		if err != nil {
-			h.Breaker.OnFailure(cand.provider.ID)
+			breakerFail(cand.provider)
 			lastErrMsg = "invalid credential for " + cand.provider.Name + ": " + err.Error()
+			h.noteFailure(userID, apiKeyID, cand.provider.ID, req.Model, errKindCredential, 0, lastErrMsg, start)
 			continue
 		}
 		if credStatus == "revoked" {
 			lastErrMsg = "channel " + cand.provider.Name + " credential revoked (re-auth required)"
+			h.noteFailure(userID, apiKeyID, cand.provider.ID, req.Model, errKindCredential, 0, lastErrMsg, start)
 			continue
 		}
 
@@ -264,8 +306,9 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 				upstreamBody, err = injectCodexSession(upstreamBody, sessionID)
 			}
 			if err != nil {
-				h.Breaker.OnFailure(cand.provider.ID)
+				breakerFail(cand.provider)
 				lastErrMsg = "codex transform failed for " + cand.provider.Name + ": " + err.Error()
+				h.noteFailure(userID, apiKeyID, cand.provider.ID, req.Model, errKindTransform, 0, lastErrMsg, start)
 				continue
 			}
 			// 转发侧兜底归一化：存量错渠道（历史默认值缺 /codex/responses 尾段）
@@ -274,8 +317,9 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 		case protoAnthropic:
 			upstreamBody, err = pivotToAnthropicRequest(req.Pivot, cand.upModel)
 			if err != nil {
-				h.Breaker.OnFailure(cand.provider.ID)
+				breakerFail(cand.provider)
 				lastErrMsg = "anthropic transform failed for " + cand.provider.Name + ": " + err.Error()
+				h.noteFailure(userID, apiKeyID, cand.provider.ID, req.Model, errKindTransform, 0, lastErrMsg, start)
 				continue
 			}
 			target = upstreamTargetAnthropic(cand.provider.BaseURL)
@@ -287,10 +331,14 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 		// 渠道级出口代理：勾选代理但平台未配置 → failover 该渠道（不静默直连）
 		client, perr := h.clientFor(cand.provider)
 		if perr != nil {
-			h.Breaker.OnFailure(cand.provider.ID)
+			breakerFail(cand.provider)
 			lastErrMsg = perr.Error()
+			h.noteFailure(userID, apiKeyID, cand.provider.ID, req.Model, errKindProxy, 0, lastErrMsg, start)
 			continue
 		}
+
+		// 上游 UA：默认透传客户端（Codex 渠道保持固定值），渠道可自定义/强制透传
+		ua := ResolveUserAgent(cand.provider, proto, clientUA)
 
 		var status int
 		var usage UsageRecord
@@ -298,13 +346,13 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 		switch proto {
 		case protoResponses:
 			status, usage, callErr = h.upstreamCallCodex(r.Context(), client, target, apiKey,
-				tokenExtra["chatgptAccountId"], upstreamBody, req.Stream, entry, w, cand.provider)
+				tokenExtra["chatgptAccountId"], upstreamBody, req.Stream, entry, w, cand.provider, ua)
 		case protoAnthropic:
 			status, usage, callErr = h.upstreamCallAnthropic(r.Context(), client, target, cand.provider,
-				apiKey, upstreamBody, req.Stream, entry, w)
+				apiKey, upstreamBody, req.Stream, entry, w, ua)
 		default:
 			status, usage, callErr = h.upstreamCall(r.Context(), client, target, apiKey,
-				upstreamBody, req.Stream, entry, w)
+				upstreamBody, req.Stream, entry, w, ua)
 		}
 
 		// 记账（含失败请求：tokens=0，status/latency 保留）
@@ -317,7 +365,21 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 			if clientGone(r.Context().Err()) || clientGone(callErr) {
 				return
 			}
-			h.Breaker.OnFailure(cand.provider.ID)
+			// 只有渠道/网络层面的故障才计入熔断：4xx（参数错、模型不存在、
+			// 凭据无权、体过大…）照常 failover，但不能把整条渠道打死。
+			// 流式已提交响应后上游半路断流属于传输层故障，按故障计。
+			if channelFailure(callErr, status) {
+				breakerFail(cand.provider)
+			}
+			kind := errKindTransport
+			switch {
+			case status >= 400:
+				kind = classifyUpstreamStatus(status)
+			case status >= 200 && status < 300:
+				// 流式响应已开始后上游中断（客户端看到截断）
+				kind = errKindStreamAborted
+			}
+			h.noteFailure(userID, apiKeyID, cand.provider.ID, req.Model, kind, status, upstreamFailureDetail(callErr), start)
 			lastStatus = status
 			lastErrMsg = "upstream " + cand.provider.Name + " failed: " + callErr.Error()
 			lastErrDetail = ""
@@ -344,9 +406,12 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 		}
 
 		if shouldFailover(status, nil) {
-			h.Breaker.OnFailure(cand.provider.ID)
+			// 上游返回了 429/5xx 但没附带 error（非标准实现）：与 error 路径共用分类
+			breakerFail(cand.provider)
 			lastStatus = status
 			lastErrMsg = "upstream " + cand.provider.Name + " returned " + http.StatusText(status)
+			h.noteFailure(userID, apiKeyID, cand.provider.ID, req.Model, classifyUpstreamStatus(status), status,
+				lastErrMsg+"（上游未返回错误详情）", start)
 			if req.Stream && status > 0 {
 				return // 流已透传错误状态，无法重试
 			}
@@ -354,7 +419,9 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 		}
 
 		// 成功
-		h.Breaker.OnSuccess(cand.provider.ID)
+		if breakerCheckEnabled(cand.provider) {
+			h.Breaker.OnSuccess(cand.provider.ID)
+		}
 		return
 	}
 
@@ -420,6 +487,47 @@ func (h *Handler) recordUsage(ctx context.Context, userID, apiKeyID, providerID 
 		Cost:             e.cost,
 	}
 	_ = h.Op.FlushUsageBatch([]*model.UsageLog{ul}, map[int64]float64{ul.ApiKeyID: ul.Cost})
+}
+
+// noteFailure 记录一次失败诊断（异步；ErrorWriter 未注入时直接落库）。
+//
+// 调用点覆盖「无候选渠道 / 熔断中 / 凭据问题 / 协议转换 / 代理配置 / 上游调用」
+// 全部失败分支；客户端主动断开不计（不是渠道问题）。
+func (h *Handler) noteFailure(userID, apiKeyID, providerID int64, modelName, kind string, status int, msg string, start time.Time) {
+	if h.Op == nil || kind == "" {
+		return
+	}
+	row := &model.RequestError{
+		UserID:     userID,
+		ProviderID: providerID,
+		ApiKeyID:   apiKeyID,
+		Model:      modelName,
+		Kind:       kind,
+		StatusCode: status,
+		Message:    truncateErrMessage(normalizeErrWhitespace(msg)),
+		LatencyMs:  int(time.Since(start).Milliseconds()),
+	}
+	if h.ErrSink != nil {
+		h.ErrSink.Record(row)
+		return
+	}
+	_ = h.Op.InsertRequestErrors([]*model.RequestError{row})
+}
+
+// upstreamFailureDetail 生成可落库的失败摘要。
+//
+// 上游非 2xx 正文可能回显 prompt 片段（见 UpstreamError.Detail 注释），所以只取
+// 结构化错误字段（reqerr.sanitizeErrMessage）；其余错误类型直接用 Error()——
+// 它本身就是协议层描述（状态码/content-type），不含上游正文。
+func upstreamFailureDetail(err error) string {
+	var ue *UpstreamError
+	if errors.As(err, &ue) {
+		if s := sanitizeErrMessage(ue.Body, ue.ContentType); s != "" {
+			return s
+		}
+		return fmt.Sprintf("upstream %d（无错误详情）", ue.Status)
+	}
+	return err.Error()
 }
 
 // buildUpstreamBody 把请求体里的模型名替换为上游名，并把 developer role 归一化
@@ -515,6 +623,7 @@ func (h *Handler) upstreamCall(
 	isStream bool,
 	entry string,
 	w http.ResponseWriter,
+	ua string,
 ) (int, UsageRecord, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, strings.NewReader(string(body)))
 	if err != nil {
@@ -522,6 +631,9 @@ func (h *Handler) upstreamCall(
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
+	if ua != "" {
+		req.Header.Set("User-Agent", ua)
+	}
 	if isStream {
 		req.Header.Set("Accept", "text/event-stream")
 	} else {
@@ -536,7 +648,7 @@ func (h *Handler) upstreamCall(
 
 	if upResp.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(upResp.Body, 4<<10))
-		return upResp.StatusCode, UsageRecord{}, &UpstreamError{Status: upResp.StatusCode, Body: string(b)}
+		return upResp.StatusCode, UsageRecord{}, &UpstreamError{Status: upResp.StatusCode, Body: string(b), ContentType: upResp.Header.Get("Content-Type")}
 	}
 
 	if isStream {

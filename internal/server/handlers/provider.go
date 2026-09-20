@@ -26,6 +26,8 @@ import (
 
 type ProviderHandler struct {
 	Op *op.Op
+	// Breaker relay 进程内熔断快照（只读引用 + 用户手动重置；nil = 不可用）
+	Breaker *relay.Breaker
 }
 
 type createProviderReq struct {
@@ -42,6 +44,13 @@ type createProviderReq struct {
 	// UseProxy 上游请求是否走平台代理。nil（前端未传）时 oauth 渠道按预设
 	// NeedsProxy 取默认（如 OpenAI 默认 true），api_key 渠道默认 false。
 	UseProxy *bool `json:"use_proxy"`
+	// BreakerCheck 是否参与熔断检测。缺省 false（不熔断）：只测单一渠道且不稳定时，
+	// 熔断后无备选可 failover，不如一直重试。
+	BreakerCheck *bool `json:"breaker_check"`
+	// UAMode 上游 UA 策略：""（默认透传客户端）/ custom / forward
+	UAMode *string `json:"ua_mode"`
+	// UserAgent UAMode=custom 时的值
+	UserAgent *string `json:"user_agent"`
 }
 
 // oauthDefaultBaseURL 各 oauth provider 的默认上游（oauth/presets.go ProviderPresets 单一事实来源）。
@@ -206,6 +215,25 @@ func (h *ProviderHandler) Create(w http.ResponseWriter, r *http.Request) {
 		useProxy = false
 	}
 
+	// UA 策略校验：mode ∈ {默认/custom/forward}；custom 必须带合法值
+	// （禁 CR/LF 防 header 注入，≤256）
+	uaMode := ""
+	if req.UAMode != nil {
+		uaMode = *req.UAMode
+	}
+	if !relay.ValidUAMode(uaMode) {
+		resp.BadRequest(w, "invalid ua_mode")
+		return
+	}
+	uaValue := ""
+	if req.UserAgent != nil {
+		uaValue = strings.TrimSpace(*req.UserAgent)
+	}
+	if uaMode == relay.UAModeCustom && !relay.ValidUserAgent(uaValue) {
+		resp.BadRequest(w, "invalid user_agent: 自定义 UA 不能为空、不能含换行，且不超过 256 字符")
+		return
+	}
+
 	// 计费名映射校验：目标必须在价格表内（映射只做名称归一化，改不了价格）
 	if err := h.validateBillingMap(req.BillingMap); err != nil {
 		resp.BadRequest(w, err.Error())
@@ -222,6 +250,9 @@ func (h *ProviderHandler) Create(w http.ResponseWriter, r *http.Request) {
 		BillingMap:    req.BillingMap,
 		Priority:      req.Priority,
 		UseProxy:      useProxy,
+		BreakerCheck:  req.BreakerCheck != nil && *req.BreakerCheck,
+		UAMode:        uaMode,
+		UserAgent:     uaValue,
 		// oauth 渠道授权完成前不参与转发：创建时禁用，saveTokenSet 首次授权成功后自动启用
 		Enabled: req.Kind == "api_key",
 	}
@@ -325,7 +356,11 @@ type updateProviderReq struct {
 	Priority   *int              `json:"priority"`
 	Enabled    *bool             `json:"enabled"`
 	UseProxy   *bool             `json:"use_proxy"`
-	APIKey     *string           `json:"api_key"` // 传入则轮换凭据
+	// BreakerCheck 是否参与熔断检测（默认不熔断）
+	BreakerCheck *bool   `json:"breaker_check"`
+	UAMode       *string `json:"ua_mode"`
+	UserAgent    *string `json:"user_agent"`
+	APIKey       *string `json:"api_key"` // 传入则轮换凭据
 }
 
 // proxyAvailable 平台是否已配置出口代理（TTL 缓存内的新配置也一致）。
@@ -416,6 +451,31 @@ func (h *ProviderHandler) Update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// UA 策略校验：必须在写库前完成（UpdateProvider 闭包里的 return 无法阻止
+	// 已经发生的部分字段更新）。custom 时必须带合法值（禁 CR/LF 防 header 注入）。
+	if req.UAMode != nil || req.UserAgent != nil {
+		cur, err := h.Op.GetProvider(userID, id)
+		if err != nil {
+			resp.NotFound(w, "provider not found")
+			return
+		}
+		mode := cur.UAMode
+		if req.UAMode != nil {
+			mode = *req.UAMode
+		}
+		if !relay.ValidUAMode(mode) {
+			resp.BadRequest(w, "invalid ua_mode")
+			return
+		}
+		value := cur.UserAgent
+		if req.UserAgent != nil {
+			value = strings.TrimSpace(*req.UserAgent)
+		}
+		if mode == relay.UAModeCustom && !relay.ValidUserAgent(value) {
+			resp.BadRequest(w, "invalid user_agent: 自定义 UA 不能为空、不能含换行，且不超过 256 字符")
+			return
+		}
+	}
 	p, err := h.Op.UpdateProvider(userID, id, func(p *model.Provider) {
 		if req.Name != nil {
 			p.Name = *req.Name
@@ -447,6 +507,15 @@ func (h *ProviderHandler) Update(w http.ResponseWriter, r *http.Request) {
 		if req.UseProxy != nil {
 			p.UseProxy = useProxy
 		}
+		if req.BreakerCheck != nil {
+			p.BreakerCheck = *req.BreakerCheck
+		}
+		if req.UAMode != nil {
+			p.UAMode = *req.UAMode
+		}
+		if req.UserAgent != nil {
+			p.UserAgent = strings.TrimSpace(*req.UserAgent)
+		}
 	})
 	if err != nil {
 		resp.NotFound(w, "provider not found")
@@ -458,7 +527,7 @@ func (h *ProviderHandler) Update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	changes := make([]string, 0, 5)
+	changes := make([]string, 0, 6)
 	if req.Name != nil {
 		changes = append(changes, "name")
 	}
@@ -482,6 +551,12 @@ func (h *ProviderHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.UseProxy != nil {
 		changes = append(changes, "use_proxy")
+	}
+	if req.BreakerCheck != nil {
+		changes = append(changes, "breaker_check")
+	}
+	if req.UAMode != nil || req.UserAgent != nil {
+		changes = append(changes, "user_agent")
 	}
 	if req.APIKey != nil {
 		changes = append(changes, "credential(rotated)")

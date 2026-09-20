@@ -4,6 +4,7 @@ import i18n from '@/i18n'
 import { api, ApiError, type BeginResult, type FetchModelsResult, type ModelPrice, type Provider, type ProvidersMeta, type ProviderPreset, type QuotaData, type QuotaSnapshot, type QuotaWindow, type TestModelResult } from '@/lib/api'
 import ProviderLogo from '@/components/ProviderLogo'
 import { Markdown } from '@/components/Markdown'
+import { ProvidersHealthView } from '@/components/providers-health-view'
 import { resolveProviderPlatform } from '@/lib/providerIcons'
 
 // 兜底：meta 接口不可用时向导仍可用（纯手工填写）
@@ -23,11 +24,15 @@ type WizardState = {
   model_map_text: string
   priority: number
   use_proxy: boolean // 上游请求是否走平台代理（OpenAI 等预设默认勾选）
+  breaker_check: boolean // 是否参与熔断检测（默认关：单渠道不稳定时熔断等于整段不可用）
+  ua_mode: string // 上游 UA 策略：'' 默认透传客户端 / custom / forward
+  user_agent: string // ua_mode=custom 时的 UA 值
 }
 
 const emptyWizard: WizardState = {
   step: 1, kind: 'api_key', presetKey: '', name: '', nameTouched: false, protocol: 'openai', base_url: '',
-  oauth_provider: 'kimi', api_key: '', model_map_text: '', priority: 0, use_proxy: false,
+  oauth_provider: 'kimi', api_key: '', model_map_text: '', priority: 0, use_proxy: false, breaker_check: false,
+  ua_mode: '', user_agent: '',
 }
 
 // 编辑表单：字段与新增向导保持一致（渠道类型 / OAuth provider 定型后不可改，仅展示）。
@@ -46,6 +51,9 @@ type EditForm = {
   billing_map: Record<string, string>
   api_key: string
   use_proxy: boolean
+  breaker_check: boolean
+  ua_mode: string
+  user_agent: string
 }
 
 const toEditForm = (p: Provider): EditForm => ({
@@ -63,6 +71,9 @@ const toEditForm = (p: Provider): EditForm => ({
   billing_map: p.billing_map ?? {},
   api_key: '',
   use_proxy: p.use_proxy ?? false,
+  breaker_check: p.breaker_check ?? false,
+  ua_mode: p.ua_mode ?? '',
+  user_agent: p.user_agent ?? '',
 })
 
 const presetLabel = (p: ProviderPreset) =>
@@ -180,6 +191,8 @@ export default function Providers() {
   const [list, setList] = useState<Provider[]>([])
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState('')
+  // 视图：卡片（默认，编辑/授权操作）⇄ 健康（可用性一览 + 快速启停 + 失败详情）
+  const [view, setView] = useState<'cards' | 'health'>('cards')
   const [wiz, setWiz] = useState<WizardState | null>(null)
   const [editForm, setEditForm] = useState<EditForm | null>(null)
   // 额度快照（openai codex 渠道；GET /api/quota 读快照，手动刷新走 refresh 接口）
@@ -389,6 +402,9 @@ export default function Providers() {
       name: wiz.name, kind: wiz.kind, protocol: wiz.protocol,
       model_map, priority: wiz.priority,
       use_proxy: wiz.use_proxy,
+      breaker_check: wiz.breaker_check,
+      ua_mode: wiz.ua_mode,
+      user_agent: wiz.ua_mode === 'custom' ? wiz.user_agent : '',
     }
     if (wiz.kind === 'api_key') {
       body.base_url = wiz.base_url
@@ -418,6 +434,9 @@ export default function Providers() {
       name: editForm.name, protocol: editForm.protocol,
       priority: editForm.priority, enabled: editForm.enabled,
       use_proxy: editForm.use_proxy,
+      breaker_check: editForm.breaker_check,
+      ua_mode: editForm.ua_mode,
+      user_agent: editForm.ua_mode === 'custom' ? editForm.user_agent : '',
       // 始终提交（空对象 = 清空全部模型映射），保证取消勾选能真正生效
       model_map,
       // 计费名映射（P1.5）：空对象 = 清空；后端校验映射目标必须在价格表内
@@ -657,13 +676,32 @@ export default function Providers() {
 
   return (
     <div>
-      <div className="mb-4 flex items-center justify-between">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-lg font-semibold">{t('providers.title')}</h2>
-        <button className="btn-primary" onClick={() => { resetProbe(); setWiz({ ...emptyWizard }) }}>{t('providers.addChannel')}</button>
+        <div className="flex items-center gap-2">
+          {/* 视图切换：健康视图按 24h 口径一览可用性并快速启停 */}
+          <div className="flex rounded-lg border p-0.5" style={{ borderColor: 'var(--line)' }}>
+            <button
+              className={`rounded-md px-2.5 py-1 text-xs font-medium transition ${view === 'cards' ? 'bg-violet-600 text-white' : 'text-muted hover:text-[var(--text)]'}`}
+              onClick={() => setView('cards')}
+            >
+              {t('providers.viewCards')}
+            </button>
+            <button
+              className={`rounded-md px-2.5 py-1 text-xs font-medium transition ${view === 'health' ? 'bg-violet-600 text-white' : 'text-muted hover:text-[var(--text)]'}`}
+              onClick={() => setView('health')}
+            >
+              {t('providers.viewHealth')}
+            </button>
+          </div>
+          <button className="btn-primary" onClick={() => { resetProbe(); setWiz({ ...emptyWizard }) }}>{t('providers.addChannel')}</button>
+        </div>
       </div>
       {err && <div className="mb-3 rounded-lg px-3 py-2 text-sm text-red-600 dark:text-red-400 err-well">{err}</div>}
 
-      {loading ? <div className="text-muted">{t('common.loading')}</div> : (
+      {view === 'health' ? (
+        <ProvidersHealthView onChanged={load} />
+      ) : loading ? <div className="text-muted">{t('common.loading')}</div> : (
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
           {sortedList.map((p, i) => {
             const prev = i > 0 ? sortedList[i - 1] : undefined
@@ -835,6 +873,28 @@ export default function Providers() {
                   </span>
                 </label>
               )}
+              <label className="flex items-start gap-2 text-sm">
+                <input id="wiz-breaker" type="checkbox" className="mt-1 accent-violet-500" checked={wiz.breaker_check}
+                  onChange={(e) => setWiz({ ...wiz, breaker_check: e.target.checked })} />
+                <span>
+                  {t('providers.breakerCheck')}
+                  <span className="block text-xs text-muted">{t('providers.breakerCheckHint')}</span>
+                </span>
+              </label>
+              <div>
+                <label className="label">{t('providers.uaLabel')}</label>
+                <div className="flex gap-2">
+                  <select className="input" value={wiz.ua_mode} onChange={(e) => setWiz({ ...wiz, ua_mode: e.target.value })}>
+                    <option value="">{t('providers.uaModeDefault')}</option>
+                    <option value="custom">{t('providers.uaModeCustom')}</option>
+                    <option value="forward">{t('providers.uaModeForward')}</option>
+                  </select>
+                  {wiz.ua_mode === 'custom' && (
+                    <input className="input" value={wiz.user_agent} onChange={(e) => setWiz({ ...wiz, user_agent: e.target.value })} placeholder={t('providers.uaPlaceholder')} />
+                  )}
+                </div>
+                <p className="mt-1 text-xs text-muted">{t('providers.uaHint')}</p>
+              </div>
               {wiz.kind === 'api_key' && (
                 <div>
                   <label className="label">{t('providers.wizard.apiKeyLabel')}</label>
@@ -1211,6 +1271,28 @@ export default function Providers() {
                 <input className="input" type="password" value={editForm.api_key} onChange={(e) => setEditForm({ ...editForm, api_key: e.target.value })} placeholder="sk-…" />
               </div>
             )}
+            <label className="flex items-start gap-2 text-sm">
+              <input id="ed-breaker" type="checkbox" className="mt-1 accent-violet-500" checked={editForm.breaker_check}
+                onChange={(e) => setEditForm({ ...editForm, breaker_check: e.target.checked })} />
+              <span>
+                {t('providers.breakerCheck')}
+                <span className="block text-xs text-muted">{t('providers.breakerCheckHint')}</span>
+              </span>
+            </label>
+            <div>
+              <label className="label">{t('providers.uaLabel')}</label>
+              <div className="flex gap-2">
+                <select className="input" value={editForm.ua_mode} onChange={(e) => setEditForm({ ...editForm, ua_mode: e.target.value })}>
+                  <option value="">{t('providers.uaModeDefault')}</option>
+                  <option value="custom">{t('providers.uaModeCustom')}</option>
+                  <option value="forward">{t('providers.uaModeForward')}</option>
+                </select>
+                {editForm.ua_mode === 'custom' && (
+                  <input className="input" value={editForm.user_agent} onChange={(e) => setEditForm({ ...editForm, user_agent: e.target.value })} placeholder={t('providers.uaPlaceholder')} />
+                )}
+              </div>
+              <p className="mt-1 text-xs text-muted">{t('providers.uaHint')}</p>
+            </div>
             <ModelPicker
               canFetch
               fetchHint=""

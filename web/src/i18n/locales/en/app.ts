@@ -10,6 +10,7 @@ const app = {
   tabUsage: 'Usage',
   tabSettings: 'Settings',
   tabAdminUsers: 'Users',
+  tabAdminProviders: 'Channel Health',
   tabAdminUsage: 'Platform Usage',
   tabAdminPrices: 'Model Pricing',
   tabAdminSettings: 'System Settings',

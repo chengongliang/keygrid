@@ -55,6 +55,8 @@ func NewWithOptions(o *op.Op, cfg *conf.Config, webFS fs.FS) http.Handler {
 	oauthH := &handlers.OAuthHandler{Op: o, PublicBaseURL: cfg.PublicBaseURL}
 	pricesH := &handlers.PricesHandler{Op: o}
 	relayH := relay.NewHandler(o)
+	// 用户端渠道健康：注入熔断快照引用（只读 + 用户手动重置自己渠道）
+	provH.Breaker = relayH.Breaker
 
 	// OIDC SSO —— 配置存平台设置（管理员系统设置页动态修改、保存即热生效，参考 new-api），
 	// OIDC_* 环境变量作兜底；未配置时端点自动降级（Enabled()=false）。
@@ -74,6 +76,8 @@ func NewWithOptions(o *op.Op, cfg *conf.Config, webFS fs.FS) http.Handler {
 	// usage 异步批量记账
 	uw := relay.NewUsageWriter(o, 100, 2*time.Second)
 	relayH.SetUsageWriter(uw)
+	// 失败诊断（request_errors）异步批量写入：渠道故障期不阻塞转发
+	relayH.SetErrorWriter(relay.NewErrorWriter(o, 50, 2*time.Second))
 
 	// 计费： 模型价格缓存（30s TTL 内存缓存，转发热路径零 DB 查询）
 	relayH.SetPricing(relay.NewPricing(o))
@@ -127,11 +131,15 @@ func NewWithOptions(o *op.Op, cfg *conf.Config, webFS fs.FS) http.Handler {
 			authed.Get("/keys/{id}/reveal", keyH.Reveal)
 			authed.Delete("/keys/{id}", keyH.Delete)
 
+			// 渠道可用性（健康快照 / 失败详情 / 熔断重置）：均按 user_id 收窄
+			authed.Get("/providers/health", provH.Health)
 			authed.Get("/providers", provH.List)
 			authed.Get("/providers/{id}", provH.Get)
 			authed.Post("/providers", provH.Create)
 			authed.Patch("/providers/{id}", provH.Update)
 			authed.Delete("/providers/{id}", provH.Delete)
+			authed.Get("/providers/{id}/errors", provH.Errors)
+			authed.Post("/providers/{id}/breaker/reset", provH.ResetBreaker)
 			authed.Post("/providers/{id}/test", testH.TestProvider)
 			authed.Post("/providers/{id}/models", testH.FetchUpstreamModels)
 			authed.Post("/providers/{id}/test_model", testH.TestModel)
@@ -181,6 +189,8 @@ func NewWithOptions(o *op.Op, cfg *conf.Config, webFS fs.FS) http.Handler {
 			admin.Get("/usage/hourly", adminUsageH.Hourly)
 			admin.Get("/usage/export", adminUsageH.Export)
 			admin.Get("/providers", adminProvH.List)
+			admin.Post("/providers/{id}/breaker/reset", adminProvH.ResetBreaker)
+			admin.Get("/providers/{id}/errors", adminProvH.Errors)
 			// 计费： 价格表管理
 			admin.Get("/prices", adminPricesH.List)
 			admin.Post("/prices", adminPricesH.Upsert)

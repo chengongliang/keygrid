@@ -328,7 +328,7 @@ func TestUpstreamCallAnthropicNonStreamChatEntry(t *testing.T) {
 	w := httptest.NewRecorder()
 	p := &model.Provider{Kind: "api_key", Protocol: "anthropic"}
 	status, usage, err := h.upstreamCallAnthropic(t.Context(), h.HTTPClient, up.URL+"/v1/messages", p,
-		"sk-up", upBody, false, protoOpenAI, w)
+		"sk-up", upBody, false, protoOpenAI, w, "")
 	if err != nil {
 		t.Fatalf("upstreamCallAnthropic: %v", err)
 	}
@@ -397,7 +397,7 @@ func TestUpstreamCallAnthropicMessagesPassthrough(t *testing.T) {
 	upBody := []byte(`{"model":"up-model","messages":[{"role":"user","content":"hi"}],"stream":true}`)
 	p := &model.Provider{Kind: "api_key", Protocol: "anthropic"}
 	status, usage, err := h.upstreamCallAnthropic(t.Context(), h.HTTPClient, up.URL, p,
-		"sk-up", upBody, true, protoAnthropic, w)
+		"sk-up", upBody, true, protoAnthropic, w, "")
 	if err != nil {
 		t.Fatalf("stream passthrough: %v", err)
 	}

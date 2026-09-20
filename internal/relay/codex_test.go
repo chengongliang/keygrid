@@ -210,7 +210,7 @@ func TestUpstreamCallCodexNonStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("inject session: %v", err)
 	}
-	status, usage, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, up.URL, "tok-1", "acct-9", body, false, protoOpenAI, w, nil)
+	status, usage, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, up.URL, "tok-1", "acct-9", body, false, protoOpenAI, w, nil, "")
 	if err != nil {
 		t.Fatalf("upstreamCallCodex: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestUpstreamCallCodexStream(t *testing.T) {
 	h := NewHandler(nil)
 	w := httptest.NewRecorder()
 	body, _ := BuildCodexRequest([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`), "gpt-5.4")
-	status, usage, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, up.URL, "tok-1", "", body, true, protoOpenAI, w, nil)
+	status, usage, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, up.URL, "tok-1", "", body, true, protoOpenAI, w, nil, "")
 	if err != nil {
 		t.Fatalf("upstreamCallCodex: %v", err)
 	}
@@ -525,7 +525,7 @@ func TestUpstreamCallCodexNonStreamToolCalls(t *testing.T) {
 	h := NewHandler(nil)
 	w := httptest.NewRecorder()
 	body, _ := BuildCodexRequest([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}}}]}`), "gpt-5.4")
-	status, usage, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, up.URL, "tok", "", body, false, protoOpenAI, w, nil)
+	status, usage, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, up.URL, "tok", "", body, false, protoOpenAI, w, nil, "")
 	if err != nil || status != 200 {
 		t.Fatalf("call: status=%d err=%v", status, err)
 	}
@@ -666,7 +666,7 @@ func TestUpstreamCallCodexSSEPreOutputError(t *testing.T) {
 			h := NewHandler(nil)
 			w := httptest.NewRecorder()
 			body, _ := BuildCodexRequest([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`), "gpt-5.4")
-			status, _, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, up.URL, "tok", "", body, true, protoOpenAI, w, nil)
+			status, _, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, up.URL, "tok", "", body, true, protoOpenAI, w, nil, "")
 			if status != http.StatusServiceUnavailable || err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("status=%d err=%v, want 503 containing %q", status, err, tt.want)
 			}
@@ -693,7 +693,7 @@ func TestUpstreamCallCodexSSEErrorAfterOutputStaysInStream(t *testing.T) {
 	h := NewHandler(nil)
 	w := httptest.NewRecorder()
 	body, _ := BuildCodexRequest([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`), "gpt-5.4")
-	status, _, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, up.URL, "tok", "", body, true, protoOpenAI, w, nil)
+	status, _, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, up.URL, "tok", "", body, true, protoOpenAI, w, nil, "")
 	if err != nil || status != http.StatusOK {
 		t.Fatalf("正常输出后的错误不可 failover: status=%d err=%v", status, err)
 	}
@@ -725,7 +725,7 @@ func TestUpstreamCallCodexSSEPeekReplaysResponsesBytes(t *testing.T) {
 	h := NewHandler(nil)
 	w := httptest.NewRecorder()
 	body, _ := BuildCodexRequestFromResponses([]byte(`{"model":"m","input":"hi","stream":true}`), "gpt-5.4")
-	status, usage, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, up.URL, "tok", "", body, true, protoResponses, w, nil)
+	status, usage, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, up.URL, "tok", "", body, true, protoResponses, w, nil, "")
 	if err != nil || status != http.StatusOK {
 		t.Fatalf("status=%d err=%v", status, err)
 	}
@@ -759,7 +759,7 @@ func TestUpstreamCallCodexSSEPeekReplaysToolStream(t *testing.T) {
 	h := NewHandler(nil)
 	w := httptest.NewRecorder()
 	body, _ := BuildCodexRequest([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`), "gpt-5.4")
-	status, _, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, up.URL, "tok", "", body, true, protoOpenAI, w, nil)
+	status, _, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, up.URL, "tok", "", body, true, protoOpenAI, w, nil, "")
 	if err != nil || status != http.StatusOK {
 		t.Fatalf("status=%d err=%v", status, err)
 	}
@@ -781,7 +781,7 @@ func TestUpstreamCallCodexUpstreamError(t *testing.T) {
 	h := NewHandler(nil)
 	w := httptest.NewRecorder()
 	body, _ := BuildCodexRequest([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`), "gpt-5.4")
-	status, _, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, up.URL, "tok", "", body, false, protoOpenAI, w, nil)
+	status, _, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, up.URL, "tok", "", body, false, protoOpenAI, w, nil, "")
 	if status != 401 || err == nil {
 		t.Fatalf("expected 401 + error, got %d %v", status, err)
 	}
@@ -895,7 +895,7 @@ func TestUpstreamCallCodexNonSSEWritesNothing(t *testing.T) {
 	h := NewHandler(nil)
 	w := httptest.NewRecorder()
 	body, _ := BuildCodexRequest([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`), "gpt-5.4")
-	status, _, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, up.URL, "tok", "", body, true, protoResponses, w, nil)
+	status, _, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, up.URL, "tok", "", body, true, protoResponses, w, nil, "")
 	if err == nil || status != http.StatusBadGateway {
 		t.Fatalf("status=%d err=%v, want 502", status, err)
 	}
@@ -932,7 +932,7 @@ func TestUpstreamCallCodexNormalizedHistoricalBaseURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildCodexRequestFromResponses: %v", err)
 	}
-	status, usage, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, target, "tok", "", body, true, protoResponses, w, nil)
+	status, usage, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, target, "tok", "", body, true, protoResponses, w, nil, "")
 	if err != nil || status != http.StatusOK {
 		t.Fatalf("status=%d err=%v", status, err)
 	}
