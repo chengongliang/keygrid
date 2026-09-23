@@ -54,8 +54,9 @@ export default function AdminProviders() {
     }
   }
 
+  // 仅看异常 = 熔断中/半开，或近 24h 有失败（与「24h 失败」列同一口径，含 4xx/5xx）
   const visible = onlyAbnormal
-    ? rows.filter((r) => r.breaker_check && r.breaker_state && r.breaker_state !== 'closed')
+    ? rows.filter((r) => (r.breaker_check && r.breaker_state && r.breaker_state !== 'closed') || r.fail_24h > 0)
     : rows
 
   return (
@@ -63,7 +64,10 @@ export default function AdminProviders() {
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-lg font-semibold">{t('adminProviders.title')}</h2>
         <div className="flex items-center gap-3">
-          <label className="flex cursor-pointer items-center gap-2 text-sm text-muted">
+          <label
+            className="flex cursor-pointer items-center gap-2 text-sm text-muted"
+            title={t('adminProviders.onlyAbnormalHint')}
+          >
             <input type="checkbox" checked={onlyAbnormal} onChange={(e) => setOnlyAbnormal(e.target.checked)} />
             {t('adminProviders.onlyAbnormal')}
           </label>
