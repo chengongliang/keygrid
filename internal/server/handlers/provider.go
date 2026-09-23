@@ -77,6 +77,9 @@ func normalizeOAuthBaseURL(kind, oauthProvider, baseURL string) string {
 	if kind == "oauth" && oauthProvider == "openai" {
 		return relay.NormalizeCodexBaseURL(baseURL)
 	}
+	if kind == "oauth" && oauthProvider == "xai" {
+		return relay.NormalizeXAIBaseURL(baseURL)
+	}
 	return baseURL
 }
 

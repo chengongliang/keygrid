@@ -87,7 +87,7 @@ const providers = {
   wizard: {
     typeApiKeyDesc: 'GLM / DeepSeek / SiliconFlow / 火山Ark / 千帆 / 混元 / MiMo / MiniMax 或任意 OpenAI 兼容端点',
     typeOauth: 'OAuth 订阅',
-    typeOauthDesc: 'Kimi / iFlow / Qoder / Trae / CodeBuddy / OpenAI Codex / Claude Pro 授权登录',
+    typeOauthDesc: 'Kimi / iFlow / Qoder / Trae / CodeBuddy / OpenAI Codex / xAI Grok / Claude Pro 授权登录',
     quickPick: '快速选择',
     quickPickOauth: '（OAuth 订阅平台）',
     quickPickApi: '（国内主流平台）',

@@ -87,7 +87,7 @@ const providers = {
   wizard: {
     typeApiKeyDesc: 'GLM / DeepSeek / SiliconFlow / Volcengine Ark / Qianfan / Hunyuan / MiMo / MiniMax, or any OpenAI-compatible endpoint',
     typeOauth: 'OAuth subscription',
-    typeOauthDesc: 'Kimi / iFlow / Qoder / Trae / CodeBuddy / OpenAI Codex / Claude Pro authorized login',
+    typeOauthDesc: 'Kimi / iFlow / Qoder / Trae / CodeBuddy / OpenAI Codex / xAI Grok / Claude Pro authorized login',
     quickPick: 'Quick pick',
     quickPickOauth: ' (OAuth platforms)',
     quickPickApi: ' (popular CN platforms)',

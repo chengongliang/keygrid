@@ -665,6 +665,14 @@ func (s *responsesOutState) finishStream(w io.Writer) error {
 
 // writeResponsesEvent 写一条 responses SSE 事件（data: 单行，type 在 payload 里）。
 func writeResponsesEvent(w io.Writer, data map[string]any) error {
+	if tw, ok := w.(*responsesToolWriter); ok {
+		for _, event := range tw.bridge.events(data) {
+			if err := writeSSEData(w, event); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	return writeSSEData(w, data)
 }
 

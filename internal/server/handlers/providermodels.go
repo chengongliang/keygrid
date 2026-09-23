@@ -83,13 +83,8 @@ func (h *TestHandler) FetchUpstreamModels(w http.ResponseWriter, r *http.Request
 
 	// Codex 上游无 /v1/models：返回动态模型目录（远程刷新的 Codex 客户端目录，
 	// 内嵌快照兑底），目录异常时回退预设模型目录（wizard 预填的同一份）
-	if relay.IsCodexProvider(p) {
-		models := oauth.CodexModelCatalog(p.OAuthProvider)
-		if len(models) == 0 {
-			if preset, ok := oauth.LookupPreset(p.OAuthProvider); ok {
-				models = preset.Models
-			}
-		}
+	if relay.IsResponsesProvider(p) {
+		models := responsesProviderModels(p)
 		if len(models) > 0 {
 			res.OK = true
 			res.Models = models
@@ -162,13 +157,8 @@ func (h *TestHandler) ProbeModels(w http.ResponseWriter, r *http.Request) {
 		// Codex 上游无 /v1/models（base_url 即完整 endpoint，拼 /v1/models 会被
 		// 网关 403 拒绝）：返回动态模型目录（远程刷新，内嵌快照兑底），与
 		// FetchUpstreamModels 同策略；目录异常时回退预设
-		if relay.IsCodexProvider(p) {
-			models := oauth.CodexModelCatalog(p.OAuthProvider)
-			if len(models) == 0 {
-				if preset, ok := oauth.LookupPreset(p.OAuthProvider); ok {
-					models = preset.Models
-				}
-			}
+		if relay.IsResponsesProvider(p) {
+			models := responsesProviderModels(p)
 			if len(models) > 0 {
 				res.OK = true
 				res.Models = models
@@ -231,6 +221,23 @@ func (h *TestHandler) ProbeModels(w http.ResponseWriter, r *http.Request) {
 		res.Models = models
 	}
 	emit()
+}
+
+// responsesProviderModels Responses 渠道没有通用 /v1/models：Codex 使用动态
+// 目录，xAI OAuth 使用 Grok Build 预设目录作为稳定兜底。
+func responsesProviderModels(p *model.Provider) []string {
+	if p == nil {
+		return nil
+	}
+	if relay.IsCodexProvider(p) {
+		if models := oauth.CodexModelCatalog(p.OAuthProvider); len(models) > 0 {
+			return models
+		}
+	}
+	if preset, ok := oauth.LookupPreset(p.OAuthProvider); ok {
+		return preset.Models
+	}
+	return nil
 }
 
 // testModelReq POST /api/providers/{id}/test_model 请求体。
@@ -384,12 +391,22 @@ func buildUpstreamChatProbeReq(ctx context.Context, p *model.Provider, secret, a
 
 	var target string
 	var payload []byte
-	if relay.IsCodexProvider(p) {
-		converted, err := relay.BuildCodexRequest(chatPayload, model)
+	if relay.IsResponsesProvider(p) {
+		var converted []byte
+		var err error
+		if relay.IsXAIProvider(p) {
+			converted, err = relay.BuildXAIRequest(chatPayload, model)
+		} else {
+			converted, err = relay.BuildCodexRequest(chatPayload, model)
+		}
 		if err != nil {
 			return nil, err
 		}
-		target = strings.TrimRight(p.BaseURL, "/")
+		if relay.IsXAIProvider(p) {
+			target = relay.NormalizeXAIBaseURL(p.BaseURL)
+		} else {
+			target = relay.NormalizeCodexBaseURL(p.BaseURL)
+		}
 		payload = converted
 	} else {
 		target = strings.TrimRight(p.BaseURL, "/") + "/v1/chat/completions"
@@ -402,7 +419,11 @@ func buildUpstreamChatProbeReq(ctx context.Context, p *model.Provider, secret, a
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+secret)
-	if relay.IsCodexProvider(p) {
+	if relay.IsXAIProvider(p) {
+		for k, vs := range relay.XAIUpstreamHeaders(secret, target, "") {
+			req.Header.Set(k, vs[0])
+		}
+	} else if relay.IsCodexProvider(p) {
 		req.Header.Set("Accept", "text/event-stream")
 		req.Header.Set("originator", "codex_cli_rs")
 		req.Header.Set("User-Agent", "codex_cli_rs/0.136.0")
@@ -436,7 +457,7 @@ func probeUpstreamChat(ctx context.Context, client *http.Client, p *model.Provid
 			Err: truncateBody(string(buf), 256)}
 	}
 
-	if relay.IsCodexProvider(p) {
+	if relay.IsResponsesProvider(p) {
 		agg, aggErr := relay.AggregateCodexStream(respUp.Body)
 		latency := time.Since(start).Milliseconds()
 		if aggErr != nil && agg.Content == "" {

@@ -8,7 +8,7 @@ import { ProvidersHealthView } from '@/components/providers-health-view'
 import { resolveProviderPlatform } from '@/lib/providerIcons'
 
 // 兜底：meta 接口不可用时向导仍可用（纯手工填写）
-const FALLBACK_OAUTH = ['kimi', 'openai', 'anthropic']
+const FALLBACK_OAUTH = ['kimi', 'openai', 'xai', 'anthropic']
 const FALLBACK_PROTOCOLS = ['openai', 'anthropic', 'gemini']
 
 type WizardState = {

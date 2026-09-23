@@ -286,34 +286,51 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 		var target string
 		switch proto {
 		case protoResponses:
-			// Codex 渠道：base_url 即 Responses endpoint。原始 responses 请求直转
-			// （完整保留 local_shell 等工具与 reasoning item）；无原始体（旧调用方）
-			// 时回退 pivot 双转。
+			// Codex 与 xAI 都使用 Responses 上游，但请求归一化、会话头和
+			// endpoint 规则不同，分别处理。
 			src := req.Raw
-			if len(src) > 0 {
-				upstreamBody, err = BuildCodexRequestFromResponses(src, cand.upModel)
-			} else {
-				upstreamBody, err = BuildCodexRequest(req.Pivot, cand.upModel)
-			}
-			if err == nil {
-				// session 对单次请求只解析一次：客户端显式值优先，否则按隔离身份和
-				// 当前渠道派生；只向缺失的 prompt_cache_key 注入。
-				sessionSource := src
-				if len(sessionSource) == 0 {
-					sessionSource = req.Pivot
+			if IsXAIProvider(cand.provider) {
+				if len(src) > 0 {
+					upstreamBody, err = BuildXAIRequestFromResponses(src, cand.upModel)
+				} else {
+					upstreamBody, err = BuildXAIRequest(req.Pivot, cand.upModel)
 				}
-				sessionID := resolveCodexSession(r, sessionSource, userID, apiKeyID, cand.provider.ID)
-				upstreamBody, err = injectCodexSession(upstreamBody, sessionID)
+				if err == nil {
+					sessionSource := src
+					if len(sessionSource) == 0 {
+						sessionSource = req.Pivot
+					}
+					sessionID := resolveXAISession(r, sessionSource, userID, apiKeyID, cand.provider.ID, cand.upModel)
+					if sessionID != "" {
+						upstreamBody, err = injectCodexSession(upstreamBody, sessionID)
+					}
+				}
+				target = NormalizeXAIBaseURL(cand.provider.BaseURL)
+			} else {
+				// Codex 渠道：base_url 即 Responses endpoint。原始 responses 请求直转
+				// （完整保留 local_shell 等工具与 reasoning item）；无原始体（旧调用方）
+				// 时回退 pivot 双转。
+				if len(src) > 0 {
+					upstreamBody, err = BuildCodexRequestFromResponses(src, cand.upModel)
+				} else {
+					upstreamBody, err = BuildCodexRequest(req.Pivot, cand.upModel)
+				}
+				if err == nil {
+					sessionSource := src
+					if len(sessionSource) == 0 {
+						sessionSource = req.Pivot
+					}
+					sessionID := resolveCodexSession(r, sessionSource, userID, apiKeyID, cand.provider.ID)
+					upstreamBody, err = injectCodexSession(upstreamBody, sessionID)
+				}
+				target = NormalizeCodexBaseURL(cand.provider.BaseURL)
 			}
 			if err != nil {
 				breakerFail(cand.provider)
-				lastErrMsg = "codex transform failed for " + cand.provider.Name + ": " + err.Error()
+				lastErrMsg = "responses transform failed for " + cand.provider.Name + ": " + err.Error()
 				h.noteFailure(userID, apiKeyID, cand.provider.ID, req.Model, errKindTransform, 0, lastErrMsg, start)
 				continue
 			}
-			// 转发侧兜底归一化：存量错渠道（历史默认值缺 /codex/responses 尾段）
-			// 无需迁移数据即可恢复正常路由。
-			target = NormalizeCodexBaseURL(cand.provider.BaseURL)
 		case protoAnthropic:
 			upstreamBody, err = pivotToAnthropicRequest(req.Pivot, cand.upModel)
 			if err != nil {
@@ -343,16 +360,26 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 		var status int
 		var usage UsageRecord
 		var callErr error
+		// 仅经过 pivot 的 Responses 请求需要还原工具；每次重试使用独立状态。
+		responseWriter := w
+		if entry == protoResponses && proto != protoResponses {
+			responseWriter = bridgeResponsesTools(w, req.Raw)
+		}
 		switch proto {
 		case protoResponses:
-			status, usage, callErr = h.upstreamCallCodex(r.Context(), client, target, apiKey,
-				tokenExtra["chatgptAccountId"], upstreamBody, req.Stream, entry, w, cand.provider, ua)
+			if IsXAIProvider(cand.provider) {
+				status, usage, callErr = h.upstreamCallXAI(r.Context(), client, target, apiKey,
+					upstreamBody, req.Stream, entry, w, ua)
+			} else {
+				status, usage, callErr = h.upstreamCallCodex(r.Context(), client, target, apiKey,
+					tokenExtra["chatgptAccountId"], upstreamBody, req.Stream, entry, w, cand.provider, ua)
+			}
 		case protoAnthropic:
 			status, usage, callErr = h.upstreamCallAnthropic(r.Context(), client, target, cand.provider,
-				apiKey, upstreamBody, req.Stream, entry, w, ua)
+				apiKey, upstreamBody, req.Stream, entry, responseWriter, ua)
 		default:
 			status, usage, callErr = h.upstreamCall(r.Context(), client, target, apiKey,
-				upstreamBody, req.Stream, entry, w, ua)
+				upstreamBody, req.Stream, entry, responseWriter, ua)
 		}
 
 		// 记账（含失败请求：tokens=0，status/latency 保留）

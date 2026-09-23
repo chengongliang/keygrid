@@ -494,7 +494,7 @@ func TestResponsesToPivotReasoningEffort(t *testing.T) {
 	}
 }
 
-// ---- tools 过滤：chat 端点只认 function/custom，其他类型丢弃而非透传 ----
+// ---- tools 转换：custom 包装为 function，无法表达的托管工具丢弃 ----
 
 func TestResponsesToPivotToolsFiltering(t *testing.T) {
 	body := `{"model":"m","input":"hi","tools":[
@@ -521,7 +521,8 @@ func TestResponsesToPivotToolsFiltering(t *testing.T) {
 		t.Fatalf("function nesting broken: %v", fn)
 	}
 	cu, _ := tools[1].(map[string]any)
-	if cu["type"] != "custom" || cu["name"] != "nota" {
+	customFn, _ := cu["function"].(map[string]any)
+	if cu["type"] != "function" || customFn["name"] == "" {
 		t.Fatalf("custom tool: %v", cu)
 	}
 }

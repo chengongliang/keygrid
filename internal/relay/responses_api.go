@@ -19,7 +19,7 @@ import (
 // 已知取舍（对齐 9router 无状态网关语义）：
 //   - previous_response_id / store 等服务端状态参数不支持，丢弃
 //   - input 里的 reasoning item 不回传 pivot（无等价字段）
-//   - custom_tool_call 等扩展 item 类型按未知类型丢弃
+//   - namespace/custom 工具经请求级映射转换为 Chat 函数，返回时还原
 
 // responsesToPivotRequest 解析 Responses 请求体，转成 pivot（chat/completions 形状）。
 // 返回 (pivot 请求体, model, stream, err)。
@@ -33,6 +33,7 @@ func responsesToPivotRequest(body []byte) ([]byte, string, bool, error) {
 		return nil, "", false, fmt.Errorf("responses: model required")
 	}
 	stream, _ := req["stream"].(bool)
+	toolBridge := newResponsesToolBridge(req)
 
 	messages := make([]any, 0, 16)
 	// instructions → system 消息
@@ -47,8 +48,22 @@ func responsesToPivotRequest(body []byte) ([]byte, string, bool, error) {
 		}
 	case []any:
 		for _, it := range input {
-			if msgs := responsesItemToPivotMessages(it); len(msgs) > 0 {
-				messages = append(messages, msgs...)
+			if msgs := responsesItemToPivotMessages(toolBridge.inputItem(it)); len(msgs) > 0 {
+				for _, msg := range msgs {
+					// Responses 将并行调用拆成多个 item；Chat 要求同一轮调用
+					// 属于同一条 assistant 消息，然后再接各个 tool 结果。
+					current, _ := msg.(map[string]any)
+					calls, _ := current["tool_calls"].([]any)
+					if len(calls) > 0 && len(messages) > 0 {
+						previous, _ := messages[len(messages)-1].(map[string]any)
+						previousCalls, _ := previous["tool_calls"].([]any)
+						if previous["role"] == "assistant" && len(previousCalls) > 0 {
+							previous["tool_calls"] = append(previousCalls, calls...)
+							continue
+						}
+					}
+					messages = append(messages, msg)
+				}
 			}
 		}
 	}
@@ -59,51 +74,15 @@ func responsesToPivotRequest(body []byte) ([]byte, string, bool, error) {
 		"stream":   stream,
 	}
 
-	// tools：responses 扁平 {type:function,name,...} → chat 嵌套
-	if tools, ok := req["tools"].([]any); ok {
-		chatTools := make([]any, 0, len(tools))
-		for _, ti := range tools {
-			t, ok := ti.(map[string]any)
-			if !ok {
-				continue
-			}
-			if t["type"] != "function" && t["type"] != "custom" {
-				// chat/completions 只认 function/custom；codex 的 local_shell 等
-				// 入口特有类型无法映射，丢弃而非透传——否则上游参数校验直接
-				// 400 拒绝整条请求（如 "field Tools[0].Type invalid"）。
-				continue
-			}
-			if t["type"] == "custom" {
-				// custom（自由文本工具）两侧形状一致，原样保留
-				chatTools = append(chatTools, t)
-				continue
-			}
-			name := strings.TrimSpace(str(t["name"]))
-			if name == "" {
-				continue
-			}
-			fn := map[string]any{
-				"name":       truncUTF8(name, 128),
-				"parameters": ensureObjectSchema(t["parameters"]),
-			}
-			if d, ok := t["description"].(string); ok {
-				fn["description"] = d
-			}
-			if s, ok := t["strict"].(bool); ok {
-				fn["strict"] = s
-			}
-			chatTools = append(chatTools, map[string]any{"type": "function", "function": fn})
-		}
-		if len(chatTools) > 0 {
-			out["tools"] = chatTools
-		}
+	if len(toolBridge.tools) > 0 {
+		out["tools"] = toolBridge.tools
 	}
 
 	// tool_choice：responses {type:function,name} → chat {type:function,function:{name}}
 	switch tc := req["tool_choice"].(type) {
 	case map[string]any:
-		if tc["type"] == "function" {
-			if name := str(tc["name"]); name != "" {
+		if tc["type"] == "function" || tc["type"] == "custom" {
+			if name := toolBridge.alias(tc, tc["type"] == "custom"); name != "" {
 				out["tool_choice"] = map[string]any{
 					"type":     "function",
 					"function": map[string]any{"name": name},
@@ -208,7 +187,7 @@ func responsesItemToPivotMessages(it any) []any {
 			"content":      stringifyArg(m["output"]),
 		}}
 	default:
-		// reasoning / item_reference / custom_tool_call 等不参与 pivot
+		// reasoning / item_reference 等不参与 pivot
 		return nil
 	}
 }
@@ -321,6 +300,9 @@ func writeResponsesJSON(w http.ResponseWriter, model string, agg relayAgg) {
 		})
 	}
 
+	if tw, ok := w.(*responsesToolWriter); ok {
+		tw.bridge.restoreOutput(output)
+	}
 	status := "completed"
 	incomplete := any(nil)
 	if agg.FinishReason == "length" {

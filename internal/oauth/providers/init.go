@@ -7,6 +7,7 @@ import "github.com/chengongliang/keygrid/internal/oauth"
 func init() {
 	oauth.Register(Kimi{})
 	oauth.Register(OpenAI{})
+	oauth.Register(XAI{})
 	oauth.Register(Anthropic{})
 	oauth.Register(IFlow{})
 	oauth.Register(Qoder{})

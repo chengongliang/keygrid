@@ -37,9 +37,9 @@ import (
 
 const anthropicVersion = "2023-06-01"
 
-// channelProto 渠道上游协议：responses（codex）/ anthropic / openai（默认）。
+// channelProto 渠道上游协议：responses（Codex/Grok）/ anthropic / openai（默认）。
 func channelProto(p *model.Provider) string {
-	if IsCodexProvider(p) {
+	if IsResponsesProvider(p) {
 		return protoResponses
 	}
 	if p != nil && p.Protocol == "anthropic" {

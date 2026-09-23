@@ -106,6 +106,15 @@ var providerPresets = []ProviderPreset{
 		Description: "OpenAI Codex（ChatGPT 订阅额度，Responses 协议，平台自动续期）",
 	},
 	{
+		Key: "xai", Kind: "oauth", Protocol: "openai",
+		BaseURL:     "https://cli-chat-proxy.grok.com/v1/responses",
+		SignupURL:   "https://grok.com",
+		Models:      []string{"grok-4.5", "grok-4.3", "grok-composer-2.5-fast", "grok-code-fast-1"},
+		AuthMode:    "device_code 授权登录（Grok Build）",
+		NeedsProxy:  true,
+		Description: "xAI Grok（Grok Build 订阅额度，Responses 协议，平台自动续期）",
+	},
+	{
 		Key: "kimi", Kind: "oauth", Protocol: "anthropic",
 		BaseURL:   "https://api.kimi.com/coding",
 		SignupURL: "https://www.kimi.com/code",

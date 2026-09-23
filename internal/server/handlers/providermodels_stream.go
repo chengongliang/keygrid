@@ -203,7 +203,7 @@ func pushStreamChat(w http.ResponseWriter, flusher http.Flusher, ctx context.Con
 		writeSSE(w, flusher, ev)
 	}
 
-	if relay.IsCodexProvider(p) {
+	if relay.IsResponsesProvider(p) {
 		agg, aggErr := relay.AggregateCodexStreamOnDelta(body, func(contentDelta, reasoningDelta string) {
 			sendDelta(contentDelta, reasoningDelta)
 		})

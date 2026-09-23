@@ -135,14 +135,27 @@ func credentialSecretForTest(cred *model.Credential) (string, map[string]string,
 func probeUpstream(ctx context.Context, client *http.Client, p *model.Provider, secret, accountID, model string) (int, int64, string) {
 	var target string
 	var payload []byte
-	if relay.IsCodexProvider(p) {
-		target = strings.TrimRight(p.BaseURL, "/")
-		payload, _ = json.Marshal(map[string]any{
-			"model":  model,
-			"input":  []any{},
-			"stream": true,
-			"store":  false,
-		})
+	if relay.IsResponsesProvider(p) {
+		if relay.IsXAIProvider(p) {
+			payload, _ = json.Marshal(map[string]any{
+				"model": model,
+				"input": []any{map[string]any{
+					"type": "message", "role": "user",
+					"content": []any{map[string]any{"type": "input_text", "text": "ping"}},
+				}},
+				"stream": true,
+				"store":  false,
+			})
+			target = relay.NormalizeXAIBaseURL(p.BaseURL)
+		} else {
+			payload, _ = json.Marshal(map[string]any{
+				"model":  model,
+				"input":  []any{},
+				"stream": true,
+				"store":  false,
+			})
+			target = relay.NormalizeCodexBaseURL(p.BaseURL)
+		}
 	} else {
 		target = strings.TrimRight(p.BaseURL, "/") + "/v1/chat/completions"
 		payload, _ = json.Marshal(map[string]any{
@@ -158,7 +171,11 @@ func probeUpstream(ctx context.Context, client *http.Client, p *model.Provider, 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+secret)
-	if relay.IsCodexProvider(p) {
+	if relay.IsXAIProvider(p) {
+		for k, vs := range relay.XAIUpstreamHeaders(secret, target, "") {
+			req.Header.Set(k, vs[0])
+		}
+	} else if relay.IsCodexProvider(p) {
 		// 9router codex transport.headers + chatgpt-account-id
 		req.Header.Set("originator", "codex_cli_rs")
 		req.Header.Set("User-Agent", "codex_cli_rs/0.136.0")
