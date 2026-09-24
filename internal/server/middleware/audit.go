@@ -9,10 +9,12 @@ import (
 
 // Event names
 const (
-	AuditEventRegister       = "user.register"
-	AuditEventLoginOK        = "user.login"
-	AuditEventLoginFail      = "user.login_fail"
-	AuditEventLoginRateHit   = "user.login_rate_limited"
+	AuditEventRegister     = "user.register"
+	AuditEventLoginOK      = "user.login"
+	AuditEventLoginFail    = "user.login_fail"
+	AuditEventLoginRateHit = "user.login_rate_limited"
+	// 自助修改密码（成功与失败均留痕，detail 区分失败原因）
+	AuditEventPasswordChange = "user.password_change"
 	AuditEventKeyCreate      = "apikey.create"
 	AuditEventKeyUpdate      = "apikey.update"
 	AuditEventKeyReveal      = "apikey.reveal"

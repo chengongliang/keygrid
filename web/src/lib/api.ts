@@ -38,7 +38,7 @@ export const api = {
 }
 
 // ---- types ----
-export interface User { id: number; email: string; name?: string; role: string }
+export interface User { id: number; email: string; name?: string; role: string; /** false = 纯 SSO 账号（无本地密码，禁用改密入口） */ has_password?: boolean }
 
 export interface Provider {
   id: number

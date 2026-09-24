@@ -32,6 +32,11 @@ type loginReq struct {
 	Password string `json:"password"`
 }
 
+type changePasswordReq struct {
+	OldPassword string `json:"old_password"`
+	NewPassword string `json:"new_password"`
+}
+
 func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	var req registerReq
 	if err := resp.Decode(r, &req); err != nil {
@@ -140,8 +145,58 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	middleware.Audit(h.Op, u.ID, middleware.AuditEventLoginOK, "", middleware.ClientIP(r), r.UserAgent())
 	resp.Success(w, map[string]any{
 		"token": token,
-		"user":  map[string]any{"id": u.ID, "email": u.Email, "name": u.Name, "role": u.Role},
+		"user":  sessionUser(u),
 	})
+}
+
+// ChangePassword POST /api/auth/change_password —— 自助修改密码（需验证旧密码）。
+// SSO-only 账号（password_hash 为空，账号由 OIDC JIT 建号）禁用：密码由 IdP 管理，
+// 平台侧不存在可改的密码，handler 层直接拒绝（前端依据 has_password=false 隐藏表单）。
+func (h *AuthHandler) ChangePassword(w http.ResponseWriter, r *http.Request) {
+	var req changePasswordReq
+	if err := resp.Decode(r, &req); err != nil {
+		resp.BadRequest(w, "invalid json body")
+		return
+	}
+	uid := middleware.UserID(r.Context())
+	u, err := h.Op.GetUser(uid)
+	if err != nil {
+		resp.NotFound(w, "user not found")
+		return
+	}
+	if status, msg, detail := checkPasswordChange(u.PasswordHash, req.OldPassword, req.NewPassword); status != 0 {
+		if detail != "" { // 只留痕安全相关失败（旧密码错误 / SSO-only 尝试），强度不足属表单校验
+			middleware.Audit(h.Op, uid, middleware.AuditEventPasswordChange, detail, middleware.ClientIP(r), r.UserAgent())
+		}
+		resp.Error(w, status, status, msg)
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		resp.Internal(w, "hash password failed")
+		return
+	}
+	if err := h.Op.SetPassword(uid, string(hash)); err != nil {
+		resp.Internal(w, "update password failed")
+		return
+	}
+	middleware.Audit(h.Op, uid, middleware.AuditEventPasswordChange, "changed own password", middleware.ClientIP(r), r.UserAgent())
+	resp.Success(w, map[string]any{"ok": true})
+}
+
+// checkPasswordChange 自助改密的纯校验逻辑（单测覆盖），返回非 0 状态码即拒绝；
+// detail 仅用于审计留痕（空 = 无需留痕的普通表单校验失败）。
+func checkPasswordChange(passwordHash, oldPass, newPass string) (status int, msg, detail string) {
+	if passwordHash == "" {
+		return http.StatusForbidden, "password is managed by SSO provider", "oidc-only user tried password change"
+	}
+	if len(newPass) < 8 {
+		return http.StatusBadRequest, "new password must be at least 8 characters", ""
+	}
+	if bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(oldPass)) != nil {
+		return http.StatusBadRequest, "current password is incorrect", "wrong current password"
+	}
+	return 0, "", ""
 }
 
 // Me GET /api/auth/me —— 前端会话校验/用户信息。
@@ -151,7 +206,19 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 		resp.NotFound(w, "user not found")
 		return
 	}
-	resp.Success(w, map[string]any{"id": u.ID, "email": u.Email, "name": u.Name, "role": u.Role})
+	resp.Success(w, sessionUser(u))
+}
+
+// sessionUser 会话用户信息。has_password=false 表示 OIDC-only 账号（无本地密码），
+// 前端据此禁用「修改密码」入口。
+func sessionUser(u *model.User) map[string]any {
+	return map[string]any{
+		"id":           u.ID,
+		"email":        u.Email,
+		"name":         u.Name,
+		"role":         u.Role,
+		"has_password": u.PasswordHash != "",
+	}
 }
 
 func (h *AuthHandler) issueToken(u *model.User) (string, error) {

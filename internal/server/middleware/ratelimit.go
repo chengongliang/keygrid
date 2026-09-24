@@ -78,7 +78,7 @@ func ClientIP(r *http.Request) string {
 	return host
 }
 
-// RateLimitByIP 按客户端 IP 限速的中间件包装（登录/注册用）。
+// RateLimitByIP 按客户端 IP 限速的中间件包装（登录/注册/改密等凭据相关操作）。
 // E2E_MODE=1 时跳过，避免 E2E 反复注册/登录触发 429。
 // 注意：勿复用 SSRF_ALLOW_INTERNAL —— 那是自托管可选的 SSRF 放行开关，
 // 与登录限速无关，开着它不能顺带关掉限速。

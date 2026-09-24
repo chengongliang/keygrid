@@ -37,6 +37,8 @@ func NewWithOptions(o *op.Op, cfg *conf.Config, webFS fs.FS) http.Handler {
 	r := chi.NewRouter()
 
 	loginLimiter := mw.NewLoginRateLimiter()
+	// 自助改密独立限速：防会话被盗后爆破旧密码（与登录预算互不占用）
+	passLimiter := mw.NewLoginRateLimiter()
 	auditH := &handlers.AuditHandler{Op: o}
 	testH := &handlers.TestHandler{Op: o}
 
@@ -125,6 +127,11 @@ func NewWithOptions(o *op.Op, cfg *conf.Config, webFS fs.FS) http.Handler {
 		api.Group(func(authed chi.Router) {
 			authed.Use(mw.SessionAuth(cfg.JWTSecret))
 			authed.Get("/auth/me", authH.Me)
+			// 自助改密：IP 限速（OIDC-only 账号在 handler 内拒绝）
+			authed.Group(func(pw chi.Router) {
+				pw.Use(mw.RateLimitByIP(passLimiter))
+				pw.Post("/auth/change_password", authH.ChangePassword)
+			})
 			authed.Get("/keys", keyH.List)
 			authed.Post("/keys", keyH.Create)
 			authed.Patch("/keys/{id}", keyH.Update)

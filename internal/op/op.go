@@ -43,6 +43,12 @@ func (o *Op) GetUser(id int64) (*model.User, error) {
 	return &u, nil
 }
 
+// SetPassword 自助修改密码：只更新 password_hash（明文由 handler bcrypt 后传入），
+// 不改 status/role —— 自助改密不是解锁手段（管理员解锁走 AdminSetPassword）。
+func (o *Op) SetPassword(id int64, passwordHash string) error {
+	return o.DB.Model(&model.User{}).Where("id = ?", id).Update("password_hash", passwordHash).Error
+}
+
 // ---- api_keys ----
 
 func (o *Op) CreateApiKey(k *model.ApiKey) error {

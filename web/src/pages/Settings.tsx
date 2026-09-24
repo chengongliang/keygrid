@@ -5,12 +5,26 @@ import { api, type AuditLog, type User } from '@/lib/api'
 
 const PAGE_SIZE = 20
 
+// 后端改密错误 → 本地化文案 key（其余错误原样展示，便于排查）
+const PASSWORD_ERROR_KEYS: Record<string, string> = {
+  'current password is incorrect': 'settings.password.errCurrent',
+  'new password must be at least 8 characters': 'settings.password.errMin',
+  'password is managed by SSO provider': 'settings.password.ssoOnly',
+}
+
 export default function Settings({ user, onLogout }: { user: User | null; onLogout: () => void }) {
   const { t } = useTranslation()
   const [logs, setLogs] = useState<AuditLog[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [err, setErr] = useState('')
+  // 自助改密：SSO-only 账号（has_password=false）不渲染表单，仅展示说明
+  const [oldPw, setOldPw] = useState('')
+  const [newPw, setNewPw] = useState('')
+  const [confirmPw, setConfirmPw] = useState('')
+  const [pwErr, setPwErr] = useState('')
+  const [pwDone, setPwDone] = useState('')
+  const [pwBusy, setPwBusy] = useState(false)
 
   const load = (p: number) => {
     api.get<{ items: AuditLog[]; total: number }>(`/api/audit?page=${p}&size=${PAGE_SIZE}`)
@@ -22,6 +36,26 @@ export default function Settings({ user, onLogout }: { user: User | null; onLogo
   }
 
   useEffect(() => { load(1) }, [])
+
+  const changePassword = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setPwErr('')
+    setPwDone('')
+    if (newPw.length < 8) return setPwErr(t('settings.password.errMin'))
+    if (newPw !== confirmPw) return setPwErr(t('settings.password.errMismatch'))
+    setPwBusy(true)
+    try {
+      await api.post('/api/auth/change_password', { old_password: oldPw, new_password: newPw })
+      setOldPw(''); setNewPw(''); setConfirmPw('')
+      setPwDone(t('settings.password.updated'))
+    } catch (e2: any) {
+      const msg = String(e2?.message ?? '')
+      const key = PASSWORD_ERROR_KEYS[msg]
+      setPwErr(key ? t(key) : msg || t('common.failed'))
+    } finally {
+      setPwBusy(false)
+    }
+  }
 
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
@@ -35,6 +69,38 @@ export default function Settings({ user, onLogout }: { user: User | null; onLogo
         </div>
         <button className="btn-danger mt-4" onClick={onLogout}>{t('settings.logout')}</button>
       </div>
+
+      {user !== null && (user.has_password ? (
+        <div className="card">
+          <h2 className="mb-3 text-lg font-semibold">{t('settings.password.title')}</h2>
+          <form className="max-w-sm space-y-3" onSubmit={changePassword}>
+            <div>
+              <label className="label">{t('settings.password.current')}</label>
+              <input className="input" type="password" autoComplete="current-password" required
+                value={oldPw} onChange={(e) => setOldPw(e.target.value)} />
+            </div>
+            <div>
+              <label className="label">{t('settings.password.new')}</label>
+              <input className="input" type="password" autoComplete="new-password" required minLength={8}
+                placeholder={t('settings.password.newPlaceholder')} value={newPw} onChange={(e) => setNewPw(e.target.value)} />
+            </div>
+            <div>
+              <label className="label">{t('settings.password.confirm')}</label>
+              <input className="input" type="password" autoComplete="new-password" required minLength={8}
+                value={confirmPw} onChange={(e) => setConfirmPw(e.target.value)} />
+            </div>
+            {pwErr && <div className="rounded-lg px-3 py-2 text-sm text-red-600 dark:text-red-400 err-well">{pwErr}</div>}
+            {pwDone && <div className="w-fit rounded-lg px-3 py-2 text-sm badge-green">{pwDone}</div>}
+            <button className="btn-primary" disabled={pwBusy}>{pwBusy ? '…' : t('settings.password.submit')}</button>
+          </form>
+        </div>
+      ) : (
+        // SSO-only 账号：密码由 IdP 管理，后端同样拒绝改密接口
+        <div className="card">
+          <h2 className="mb-3 text-lg font-semibold">{t('settings.password.title')}</h2>
+          <p className="max-w-2xl text-sm text-muted">{t('settings.password.ssoOnly')}</p>
+        </div>
+      ))}
 
       <div>
         <h2 className="mb-3 text-lg font-semibold">{t('settings.auditLog')}</h2>
@@ -85,6 +151,7 @@ const EVENT_META: Record<string, { label: string; cls: string }> = {
   'user.register': { label: 'settings.event.register', cls: 'badge-green' },
   'user.login_fail': { label: 'settings.event.loginFail', cls: 'badge-red' },
   'user.login_rate_limited': { label: 'settings.event.loginRateLimited', cls: 'badge-red' },
+  'user.password_change': { label: 'settings.event.passwordChange', cls: 'badge-yellow' },
   'user.oidc_login': { label: 'settings.event.oidcLogin', cls: 'badge-green' },
   'user.oidc_login_fail': { label: 'settings.event.oidcLoginFail', cls: 'badge-red' },
   'apikey.create': { label: 'settings.event.apiKeyCreate', cls: 'badge-yellow' },
@@ -163,6 +230,16 @@ function translateDetail(event: string, detail: string): string {
       if (d.startsWith('user not found: ')) return i18n.t('settings.detail.userNotFound', { d: d.slice('user not found: '.length) })
       if (d === 'wrong password') return i18n.t('settings.detail.wrongPassword')
       if (d === 'oidc-only user tried password login') return i18n.t('settings.detail.oidcOnlyLogin')
+      return d
+    }
+
+    case 'user.password_change': {
+      // 成功为固定串，失败仅记录安全相关原因（强度不足不入审计）
+      switch (d) {
+        case 'changed own password': return i18n.t('settings.detail.passwordChanged')
+        case 'wrong current password': return i18n.t('settings.detail.wrongCurrentPassword')
+        case 'oidc-only user tried password change': return i18n.t('settings.detail.oidcOnlyPasswordChange')
+      }
       return d
     }
 

@@ -3,7 +3,8 @@
 # 前置：平台已运行（BASE，默认 http://127.0.0.1:8090），且 env ADMIN_EMAIL 指向的
 #       用户已存在（首个 admin）；或库里已有 admin。可用 ADMIN_EMAIL 环境变量覆盖。
 # 流程：注册普通用户 → admin 提升 → 用户列表/搜索 → 禁用用户 → 被禁用户登录失败
-#       → 重置密码可登录 → 注册策略 closed 拒绝注册 → 维护模式 /v1 503 → 恢复
+#       → 重置密码可登录 → 自助改密（旧密码失效/新密码生效）→ 注册策略 closed 拒绝注册
+#       → 维护模式 /v1 503 → 恢复
 set -e
 BASE="${BASE:-http://127.0.0.1:8090}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-david@company.com}"
@@ -122,5 +123,28 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' $BASE/v1/chat/completions \
   -H "Authorization: Bearer sk-e2e-maintenance-probe" -H 'Content-Type: application/json' -d '{}')
 [ "$CODE" != "503" ] || { echo "   FAIL: still 503 after restore"; exit 1; }
 echo "   restored ok"
+
+echo "== 14. 自助改密（普通用户改自己的密码）=="
+# 复用改密前的 VTOKEN（JWT 与密码无绑定，重置密码也不失效）
+SELF_NEW='SelfRotated!234'
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST $BASE/api/auth/change_password \
+  -H "Authorization: Bearer $VTOKEN" -H 'Content-Type: application/json' \
+  -d "{\"old_password\":\"WrongOld!123\",\"new_password\":\"$SELF_NEW\"}")
+[ "$CODE" = "400" ] || { echo "   FAIL: expected 400 for wrong old password, got $CODE"; exit 1; }
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST $BASE/api/auth/change_password \
+  -H "Authorization: Bearer $VTOKEN" -H 'Content-Type: application/json' \
+  -d "{\"old_password\":\"$NEWPASS\",\"new_password\":\"$SELF_NEW\"}")
+[ "$CODE" = "200" ] || { echo "   FAIL: expected 200, got $CODE"; exit 1; }
+# 旧密码已失效：再用旧密码改密必须 400（省一次登录请求，避开登录限速预算）
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST $BASE/api/auth/change_password \
+  -H "Authorization: Bearer $VTOKEN" -H 'Content-Type: application/json' \
+  -d "{\"old_password\":\"$NEWPASS\",\"new_password\":\"AnotherPass!234\"}")
+[ "$CODE" = "400" ] || { echo "   FAIL: old password still accepted ($CODE)"; exit 1; }
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST $BASE/api/auth/login -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$VICTIM\",\"password\":\"$SELF_NEW\"}")
+[ "$CODE" = "200" ] || { echo "   FAIL: new password login ($CODE)"; exit 1; }
+# /api/auth/me 携带 has_password=true（前端据此显示改密表单）
+curl -sf $BASE/api/auth/me -H "Authorization: Bearer $VTOKEN" | grep -q '"has_password":true' || { echo "   FAIL: has_password flag"; exit 1; }
+echo "   self change-password ok"
 
 echo "== ALL E2E PASS ✅ =="
