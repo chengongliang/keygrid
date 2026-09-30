@@ -203,7 +203,7 @@ func (h *Handler) upstreamCallXAI(
 	defer upResp.Body.Close()
 	if upResp.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(upResp.Body, 4<<10))
-		return upResp.StatusCode, UsageRecord{}, &UpstreamError{Status: upResp.StatusCode, Body: string(b), ContentType: upResp.Header.Get("Content-Type")}
+		return upResp.StatusCode, UsageRecord{}, &UpstreamError{Status: upResp.StatusCode, Body: string(b), ContentType: upResp.Header.Get("Content-Type"), RetryAfter: parseRetryAfter(upResp.Header.Get("Retry-After"))}
 	}
 	if status, err := peekCodexSSEError(upResp); err != nil {
 		return status, UsageRecord{}, err

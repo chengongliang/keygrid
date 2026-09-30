@@ -1135,7 +1135,7 @@ func (h *Handler) upstreamCallCodex(
 
 	if upResp.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(upResp.Body, 4<<10))
-		return upResp.StatusCode, UsageRecord{}, &UpstreamError{Status: upResp.StatusCode, Body: string(b), ContentType: upResp.Header.Get("Content-Type")}
+		return upResp.StatusCode, UsageRecord{}, &UpstreamError{Status: upResp.StatusCode, Body: string(b), ContentType: upResp.Header.Get("Content-Type"), RetryAfter: parseRetryAfter(upResp.Header.Get("Retry-After"))}
 	}
 
 	// Codex 偶尔以 HTTP 200 返回流内过载/容量错误。必须在写客户端响应头前
