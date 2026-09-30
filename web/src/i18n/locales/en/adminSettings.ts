@@ -43,6 +43,15 @@ const adminSettings = {
     saved: 'Proxy settings saved',
     save: 'Save proxy',
   },
+  // ---- WorkBuddy automation master switch ----
+  workbuddyJobs: {
+    title: 'WorkBuddy Automation Master Switch',
+    desc: 'Platform-wide master switch for WorkBuddy / CodeBuddy automation jobs (daily check-in, credits refresh, simulated chat). When off, no user job runs regardless of their own settings.',
+    enableLabel: 'Allow users to run automation jobs',
+    riskWarn: 'When on, only jobs each user has enabled will run; they simulate user behavior against the upstream and may trigger upstream risk controls. Off by default.',
+    saved: 'WorkBuddy automation master switch saved',
+    save: 'Save',
+  },
   // ---- OIDC single sign-on ----
   oidc: {
     title: 'OIDC Single Sign-On',

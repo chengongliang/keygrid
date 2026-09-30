@@ -30,6 +30,11 @@ const (
 	// 出口代理：管理员在系统设置统一配置（http/https/socks5），用户仅在渠道上勾选是否启用。
 	// 空 = 未配置代理，勾选了代理的渠道创建/启用/转发时会被拒绝。
 	SettingProxyURL = "proxy_url"
+
+	// WorkBuddy/CodeBuddy 自动化任务总闸（平台级 kill switch）："1" 允许、"0"/未设置视为
+	// 关闭（保守默认）。设置值优先于 WORKBUDDY_JOBS 环境变量 —— 合规/风控事故时管理员
+	// 可一键全停，无需重启进程。用户级开关只是在这层之下的第二道闸。
+	SettingWorkbuddyJobs = "workbuddy_jobs_enabled"
 )
 
 // 注册策略默认值：未设置时视为开放注册

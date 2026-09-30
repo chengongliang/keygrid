@@ -368,6 +368,8 @@ export interface PlatformSettings {
   registration_policy: string
   /** 平台出口代理（http/https/socks5），空 = 未配置 */
   proxy_url?: string
+  /** 平台级 WorkBuddy/CodeBuddy 自动化任务总开关，默认关 */
+  workbuddy_jobs_enabled?: boolean
   oidc?: OidcSettings
 }
 

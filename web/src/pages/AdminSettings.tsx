@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { ShieldAlert } from 'lucide-react'
 import { api, type Invitation, type OidcSettings, type PlatformSettings } from '@/lib/api'
 
 const DEFAULT_OIDC: OidcSettings = {
@@ -17,6 +18,7 @@ export default function AdminSettings() {
   const [s, setS] = useState<PlatformSettings | null>(null)
   const [announcement, setAnnouncement] = useState('')
   const [proxyURL, setProxyURL] = useState('')
+  const [wbJobsEnabled, setWbJobsEnabled] = useState(false)
   const [err, setErr] = useState('')
   const [msg, setMsg] = useState('')
   const [busy, setBusy] = useState(false)
@@ -31,7 +33,7 @@ export default function AdminSettings() {
 
   const load = () => {
     api.get<PlatformSettings>('/api/admin/settings')
-      .then((d) => { setS(d); setAnnouncement(d.announcement ?? ''); setProxyURL(d.proxy_url ?? ''); if (d.oidc) setOidc({ ...DEFAULT_OIDC, ...d.oidc }) })
+      .then((d) => { setS(d); setAnnouncement(d.announcement ?? ''); setProxyURL(d.proxy_url ?? ''); setWbJobsEnabled(d.workbuddy_jobs_enabled ?? false); if (d.oidc) setOidc({ ...DEFAULT_OIDC, ...d.oidc }) })
       .catch((e) => setErr(e.message))
     api.get<Invitation[]>('/api/admin/invitations').then((d) => setInvs(d ?? [])).catch(() => {})
   }
@@ -44,6 +46,7 @@ export default function AdminSettings() {
       setS(d)
       setAnnouncement(d.announcement ?? '')
       setProxyURL(d.proxy_url ?? '')
+      setWbJobsEnabled(d.workbuddy_jobs_enabled ?? false)
       if (d.oidc) setOidc({ ...DEFAULT_OIDC, ...d.oidc })
       flash(okMsg)
     } catch (e: any) { setErr(e.message) } finally { setBusy(false) }
@@ -172,6 +175,34 @@ export default function AdminSettings() {
           <button className="btn-primary-lg shrink-0" disabled={busy}
             onClick={() => save({ proxy_url: proxyURL.trim() }, t('adminSettings.proxy.saved'))}>
             {t('adminSettings.proxy.save')}
+          </button>
+        </div>
+      </div>
+
+      {/* WorkBuddy 自动化总开关（平台级 kill switch；关闭时任何用户任务都不执行） */}
+      <div className="card">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold">{t('adminSettings.workbuddyJobs.title')}</h3>
+          {wbJobsEnabled
+            ? <span className="badge-green shrink-0">{t('common.enabled')}</span>
+            : <span className="badge-zinc shrink-0">{t('common.disabled')}</span>}
+        </div>
+        <p className="mb-3 mt-1 text-xs text-muted">
+          {t('adminSettings.workbuddyJobs.desc')}
+        </p>
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" className="accent-violet-500" checked={wbJobsEnabled}
+            onChange={(e) => setWbJobsEnabled(e.target.checked)} />
+          {t('adminSettings.workbuddyJobs.enableLabel')}
+        </label>
+        <div className="warn-well mt-3 flex items-start gap-2 rounded-lg px-3 py-2 text-xs" style={{ color: 'var(--text)' }}>
+          <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+          <span>{t('adminSettings.workbuddyJobs.riskWarn')}</span>
+        </div>
+        <div className="mt-3 flex justify-end">
+          <button className="btn-primary" disabled={busy}
+            onClick={() => save({ workbuddy_jobs_enabled: wbJobsEnabled }, t('adminSettings.workbuddyJobs.saved'))}>
+            {t('adminSettings.workbuddyJobs.save')}
           </button>
         </div>
       </div>

@@ -51,6 +51,7 @@ type settingsResp struct {
 	MaintenanceMode    bool              `json:"maintenance_mode"`
 	RegistrationPolicy string            `json:"registration_policy"`
 	ProxyURL           string            `json:"proxy_url"`
+	WorkbuddyJobs      bool              `json:"workbuddy_jobs_enabled"`
 	Oidc               *OidcSettingsView `json:"oidc,omitempty"`
 }
 
@@ -67,12 +68,14 @@ func (h *AdminSettingsHandler) current() settingsResp {
 		rp = model.DefaultRegistrationPolicy()
 	}
 	proxyURL, _ := h.Op.GetSetting(model.SettingProxyURL)
+	wbJobs, _ := h.Op.GetSetting(model.SettingWorkbuddyJobs)
 	ov := h.oidcView()
 	return settingsResp{
 		Announcement:       ann,
 		MaintenanceMode:    mm == "1",
 		RegistrationPolicy: rp,
 		ProxyURL:           proxyURL,
+		WorkbuddyJobs:      wbJobs == "1",
 		Oidc:               &ov,
 	}
 }
@@ -84,6 +87,7 @@ func (h *AdminSettingsHandler) Put(w http.ResponseWriter, r *http.Request) {
 		MaintenanceMode    *bool   `json:"maintenance_mode"`
 		RegistrationPolicy *string `json:"registration_policy"`
 		ProxyURL           *string `json:"proxy_url"`
+		WorkbuddyJobs      *bool   `json:"workbuddy_jobs_enabled"`
 		Oidc               *struct {
 			Enabled      *bool   `json:"enabled"`
 			DisplayName  *string `json:"display_name"`
@@ -157,6 +161,17 @@ func (h *AdminSettingsHandler) Put(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		changes = append(changes, "proxy_url")
+	}
+	if req.WorkbuddyJobs != nil {
+		v := "0"
+		if *req.WorkbuddyJobs {
+			v = "1"
+		}
+		if err := h.Op.SetSetting(model.SettingWorkbuddyJobs, v); err != nil {
+			resp.Internal(w, "save setting failed")
+			return
+		}
+		changes = append(changes, "workbuddy_jobs_enabled")
 	}
 	if req.Oidc != nil {
 		changes = append(changes, "oidc settings")

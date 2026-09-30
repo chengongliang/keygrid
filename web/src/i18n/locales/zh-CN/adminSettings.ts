@@ -43,6 +43,15 @@ const adminSettings = {
     saved: '代理设置已保存',
     save: '保存代理',
   },
+  // ---- WorkBuddy 自动化总开关 ----
+  workbuddyJobs: {
+    title: 'WorkBuddy 自动化总开关',
+    desc: '平台级总开关，控制 WorkBuddy / CodeBuddy 自动化任务（每日签到、积分刷新、模拟聊天）。关闭时任何用户的任务都不会执行，与用户各自的设置无关。',
+    enableLabel: '允许用户运行自动化任务',
+    riskWarn: '开启后，仅用户自行启用的任务会运行；这些任务会模拟用户行为访问上游，可能触发上游风控。默认关闭。',
+    saved: 'WorkBuddy 自动化总开关已保存',
+    save: '保存',
+  },
   // ---- OIDC 单点登录 ----
   oidc: {
     title: 'OIDC 单点登录',
