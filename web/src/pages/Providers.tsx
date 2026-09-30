@@ -1005,9 +1005,19 @@ export default function Providers() {
           ) : (
             <div className="space-y-4 text-center">
               <p className="text-sm text-muted">{t('providers.oauth.step1Browser')}</p>
-              <a className="btn-primary w-full" href={oauthFlow.begin.authorize_url} target="_blank" rel="noreferrer">
-                {t('providers.oauth.openAuthPage')}
-              </a>
+              {/* 打开授权页的按钮必须兼容两类「无 user_code」流程：
+                  pkce 只给 authorize_url；WorkBuddy/CodeBuddy 的浏览器轮询流只给
+                  verification_uri(_complete)（没有设备码可填）。缺任一时不要渲染空链接。 */}
+              {(oauthFlow.begin.authorize_url ?? oauthFlow.begin.verification_uri_complete ?? oauthFlow.begin.verification_uri) && (
+                <a
+                  className="btn-primary w-full"
+                  href={oauthFlow.begin.authorize_url ?? oauthFlow.begin.verification_uri_complete ?? oauthFlow.begin.verification_uri}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {t('providers.oauth.openAuthPage')}
+                </a>
+              )}
               {oauthFlow.begin.redirect_uri ? (
                 <>
                   <p className="text-sm text-muted">
