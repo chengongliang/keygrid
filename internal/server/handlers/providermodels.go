@@ -10,12 +10,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chengongliang/keygrid/internal/crypto"
 	"github.com/chengongliang/keygrid/internal/model"
 	"github.com/chengongliang/keygrid/internal/oauth"
 	"github.com/chengongliang/keygrid/internal/relay"
 	"github.com/chengongliang/keygrid/internal/server/middleware"
 	"github.com/chengongliang/keygrid/internal/server/resp"
 	"github.com/chengongliang/keygrid/internal/ssrf"
+	"github.com/chengongliang/keygrid/internal/workbuddy"
 )
 
 // providermodels.go 上游模型探测：
@@ -107,6 +109,19 @@ func (h *TestHandler) FetchUpstreamModels(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// WorkBuddy/CodeBuddy 渠道的模型目录不在 OpenAI /v1/models（设计文档
+	// docs/workbuddy-integration-design.md §3.5）：优先走 workbuddy.FetchModels
+	// 的四段回落（/v3/config → 窄端点 → 内嵌快照）；取不到时回落内嵌快照，
+	// 再取不到才走既有通用 /v1/models 路径（非 workbuddy 渠道行为完全不变）。
+	if workbuddy.IsWorkBuddy(p) {
+		if models := h.workBuddyModels(r.Context(), client, p); len(models) > 0 {
+			res.OK = true
+			res.Models = models
+			emit()
+			return
+		}
+	}
+
 	models, status, errMsg := fetchAndParseUpstreamModels(r.Context(), client, p.BaseURL, secret)
 	res.Status = status
 	if errMsg != "" {
@@ -116,6 +131,45 @@ func (h *TestHandler) FetchUpstreamModels(w http.ResponseWriter, r *http.Request
 		res.Models = models
 	}
 	emit()
+}
+
+// workBuddyModels 拉取 WorkBuddy/CodeBuddy 渠道的模型目录：
+// 优先 workbuddy.FetchModels（上游目录 → 窄端点 → 内嵌快照），
+// 取不到时回落本区域内嵌快照（离线兜底）；未知区域返回 nil。
+func (h *TestHandler) workBuddyModels(ctx context.Context, client *http.Client, p *model.Provider) []string {
+	realm, ok := workbuddy.RealmOf(p)
+	if !ok {
+		return nil
+	}
+	if tok := h.workBuddyTokenSet(p); tok != nil {
+		if models, err := workbuddy.FetchModels(ctx, client, p, tok); err == nil && len(models) > 0 {
+			return models
+		}
+	}
+	return workbuddy.SnapshotModels(realm)
+}
+
+// workBuddyTokenSet 解密渠道凭据为 oauth.TokenSet（仅 oauth 类凭据；失败返回 nil）。
+// 复用现成的 crypto.Decrypt + oauth.TokenSetData 形状，不新增明文落库/日志路径。
+func (h *TestHandler) workBuddyTokenSet(p *model.Provider) *oauth.TokenSet {
+	cred, err := h.Op.GetCredentialByProviderID(p.ID)
+	if err != nil {
+		return nil
+	}
+	plain, err := crypto.Decrypt(cred.EncData)
+	if err != nil {
+		return nil
+	}
+	var d oauth.TokenSetData
+	if err := json.Unmarshal(plain, &d); err != nil || d.AccessToken == "" {
+		return nil
+	}
+	return &oauth.TokenSet{
+		AccessToken:  d.AccessToken,
+		RefreshToken: d.RefreshToken,
+		ExpiresAt:    d.ExpiresAt,
+		Extra:        d.Extra,
+	}
 }
 
 // probeModelsReq POST /api/providers/probe_models 请求体。

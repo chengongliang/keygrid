@@ -15,6 +15,7 @@ import (
 	mw "github.com/chengongliang/keygrid/internal/server/middleware"
 	"github.com/chengongliang/keygrid/internal/server/resp"
 	"github.com/chengongliang/keygrid/internal/ssrf"
+	"github.com/chengongliang/keygrid/internal/workbuddy"
 	"github.com/chengongliang/keygrid/web"
 
 	"github.com/go-chi/chi/v5"
@@ -105,6 +106,12 @@ func NewWithOptions(o *op.Op, cfg *conf.Config, webFS fs.FS) http.Handler {
 	relayH.SetQuotaSyncer(quotaSyncer)
 	quotaH := &handlers.QuotaHandler{Op: o, Syncer: quota.NewSyncer(o)}
 
+	// WorkBuddy/CodeBuddy 渠道：运行态判定器（准入/冷却/日限额）+ 用户面板路由。
+	// runtime 与转发引擎共用同一实例（relay 侧准入与面板展示必须看同一份状态）。
+	wbRuntime := workbuddy.NewRuntime(o, rdb)
+	relayH.SetWorkbuddy(wbRuntime)
+	wbH := &handlers.WorkbuddyHandler{Op: o, Runtime: wbRuntime, Client: relayH.HTTPClient}
+
 	// SSRF 防护 transport（上游转发强制走私网拒绝 Dialer）
 	relayH.HTTPClient = &http.Client{Timeout: 10 * time.Minute, Transport: ssrf.SafeTransport(10 * time.Minute)}
 
@@ -166,6 +173,12 @@ func NewWithOptions(o *op.Op, cfg *conf.Config, webFS fs.FS) http.Handler {
 			// 额度查询（openai codex /wham/usage 同步结果）：List 读快照、Refresh 手动探测
 			authed.Get("/quota", quotaH.List)
 			authed.Post("/providers/{id}/quota/refresh", quotaH.Refresh)
+
+			// WorkBuddy / CodeBuddy 渠道面板（docs/workbuddy-integration-design.md §2.5）
+			authed.Get("/workbuddy/overview", wbH.Overview)
+			authed.Patch("/workbuddy/settings", wbH.UpdateSettings)
+			authed.Post("/workbuddy/channels/{id}/credits", wbH.RefreshCredits)
+			authed.Post("/workbuddy/jobs/{job}/run", wbH.RunJob)
 
 			authed.Get("/usage", usageH.Get)
 			authed.Get("/usage/hourly", usageH.UsageHourly)

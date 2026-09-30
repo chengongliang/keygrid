@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +44,11 @@ type Handler struct {
 	OAuthLead time.Duration
 	// QuotaSyncer 额度同步器（nil = 不做 x-codex-* 响应头被动观察）
 	QuotaSyncer *quota.Syncer
+	// Workbuddy WorkBuddy/CodeBuddy 渠道运行态判定（准入过滤/冷却/日限额）。
+	// 用接口而非具体类型：转发侧只需要"能不能放行 + 回填结果"两个动作，
+	// 便于单测注入假实现（真实实现是 *workbuddy.Runtime）。
+	// nil = 不启用（非该供应商渠道本来也不会命中）。
+	Workbuddy WorkbuddyGate
 
 	// 测试注入用
 	Now func() time.Time
@@ -95,6 +101,15 @@ func (h *Handler) SetOAuthScheduler(s *oauth.Scheduler, lead time.Duration) {
 
 // SetQuotaSyncer 注入额度同步器（x-codex-* 响应头被动观察；nil = 不观察）。
 func (h *Handler) SetQuotaSyncer(s *quota.Syncer) { h.QuotaSyncer = s }
+
+// WorkbuddyGate 转发侧需要的运行态动作（由 *workbuddy.Runtime 实现）。
+type WorkbuddyGate interface {
+	Admit(p *model.Provider, upModel string) error
+	Observe(ev workbuddy.Event)
+}
+
+// SetWorkbuddy 注入 WorkBuddy/CodeBuddy 运行态判定器（nil = 不启用）。
+func (h *Handler) SetWorkbuddy(rt WorkbuddyGate) { h.Workbuddy = rt }
 
 // ---- 入口 handlers ----
 
@@ -227,6 +242,8 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 	// 2. 依序尝试渠道：熔断检查 → 解密凭据 → 调上游；失败 failover
 	var lastStatus int
 	var lastErrMsg string
+	// parkedUntil 全部候选被准入过滤拦下时的最早恢复时间（用于 Retry-After）
+	var parkedUntil time.Time
 	// 上游正文摘要仅回传客户端，不写日志（Error() 本身已不含正文，见 UpstreamError）
 	var lastErrDetail string
 	// 一次请求内同一渠道最多计一次熔断失败：failover 会把同一个请求打到多条渠道，
@@ -243,6 +260,27 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 		h.Breaker.OnFailure(p.ID)
 	}
 	for _, cand := range cands {
+		// WorkBuddy/CodeBuddy 运行态准入：用户开关 / 日 token 限额 / 保留积分 /
+		// 模型冷却（docs/workbuddy-integration-design.md §3.6）。放在熔断检查之前 ——
+		// 被拦下的候选不该消耗 half-open 探测租约，也不该被记成渠道故障。
+		if h.Workbuddy != nil {
+			if perr := h.Workbuddy.Admit(cand.provider, cand.upModel); perr != nil {
+				var parked *workbuddy.ParkedError
+				reason := perr.Error()
+				if errors.As(perr, &parked) {
+					// 用 429 收尾（限流语义），并记录最早恢复时间
+					if !parked.Until.IsZero() && (parkedUntil.IsZero() || parked.Until.Before(parkedUntil)) {
+						parkedUntil = parked.Until
+					}
+					reason = parked.Reason
+				}
+				lastStatus = http.StatusTooManyRequests
+				lastErrMsg = "channel " + cand.provider.Name + " parked: " + reason
+				h.noteFailure(userID, apiKeyID, cand.provider.ID, req.Model, errKindChannelParked, 0, lastErrMsg, start)
+				continue
+			}
+		}
+
 		// 熔断检测按渠道开关（默认关）：未开启时既不做放行检查、也不消耗探测租约，
 		// 未开启熔断检测的渠道永远放行。
 		if breakerCheckEnabled(cand.provider) {
@@ -421,6 +459,20 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 		// 记账（含失败请求：tokens=0，status/latency 保留）
 		h.recordUsage(r.Context(), userID, apiKeyID, cand.provider.ID, cand.provider, req.Model, usage, status, time.Since(start))
 
+		// WorkBuddy/CodeBuddy 运行态回填：成功清冷却 + 累加当日用量；429/6004 设冷却。
+		// 放在记账之后，因为日限额以本次 usage 为准。
+		if h.Workbuddy != nil && workbuddy.IsWorkBuddy(cand.provider) {
+			h.Workbuddy.Observe(workbuddy.Event{
+				Provider:   cand.provider,
+				UpModel:    cand.upModel,
+				Status:     status,
+				UpCode:     upstreamCodeFromError(callErr),
+				Tokens:     int64(usage.PromptTokens + usage.CompletionTokens),
+				RetryAfter: retryAfterFrom(callErr),
+				Success:    callErr == nil && status >= 200 && status < 300,
+			})
+		}
+
 		if callErr != nil && callErr != errClientGone {
 			// 客户端取消会让上游 Body.Read 返回 context canceled，而不一定被
 			// 转换成 errClientGone。必须先判断再记录渠道失败，否则 Codex 的
@@ -490,6 +542,12 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 
 	if lastStatus == 0 {
 		lastStatus = http.StatusServiceUnavailable
+	}
+	// 全部候选都被准入过滤拦下：给出最早可恢复时间，客户端可据此退避
+	if lastStatus == http.StatusTooManyRequests && !parkedUntil.IsZero() {
+		if secs := int(time.Until(parkedUntil).Seconds()); secs > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(secs))
+		}
 	}
 	log.Printf("[relay] all channels failed for model %s user=%d: %s", req.Model, userID, lastErrMsg)
 	clientMsg := lastErrMsg
@@ -727,7 +785,7 @@ func (h *Handler) upstreamCall(
 
 	if upResp.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(upResp.Body, 4<<10))
-		return upResp.StatusCode, UsageRecord{}, &UpstreamError{Status: upResp.StatusCode, Body: string(b), ContentType: upResp.Header.Get("Content-Type")}
+		return upResp.StatusCode, UsageRecord{}, &UpstreamError{Status: upResp.StatusCode, Body: string(b), ContentType: upResp.Header.Get("Content-Type"), RetryAfter: parseRetryAfter(upResp.Header.Get("Retry-After"))}
 	}
 
 	if upstreamStream && isStream {

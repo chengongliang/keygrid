@@ -33,6 +33,13 @@ const (
 	productCLI     = "cli"
 )
 
+// 导出别名：settings.product 的合法取值（server/handlers 校验用，同一值域）。
+const (
+	ProductWorkbuddy = productDesktop
+	ProductVSCode    = productVSCode
+	ProductCLI       = productCLI
+)
+
 // 区域域名（身分头里的 X-Domain / Origin / Referer）。
 // 对齐 wb_identity.py:44-53：国际版 www.workbuddy.ai，国内版 copilot.tencent.com。
 const (

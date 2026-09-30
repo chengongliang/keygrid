@@ -24,6 +24,16 @@ type Plan struct {
 	Aggregate bool
 }
 
+// 脱敏档位（settings.scrub_mode 的合法取值；实现见 P5）。
+//
+// off 完全关闭；shadow 只统计"哪些请求会被改写"但不改内容（先观察再启用，
+// 避免误伤正常对话）；on 才真正改写并从审计里留痕。
+const (
+	ScrubOff    = "off"
+	ScrubShadow = "shadow"
+	ScrubOn     = "on"
+)
+
 // 环境开关（读取时机由 sync.Once 收敛；conf 可用 SetXxx 覆盖）。
 var (
 	envOnce      sync.Once

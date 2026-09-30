@@ -36,6 +36,9 @@ const (
 	errKindUpstream5xx   = "upstream_5xx"   // 上游服务端错误
 	errKindTransport     = "transport"      // 连接 / DNS / TLS / 超时等传输层错误
 	errKindStreamAborted = "stream_aborted" // 流式响应已开始后上游中断（客户端看到截断）
+	// errKindChannelParked WorkBuddy/CodeBuddy 渠道被准入过滤拦下（用户关闭、日限额、
+	// 保留积分、模型冷却）。不是渠道故障，不计熔断；放开条件后自动恢复。
+	errKindChannelParked = "channel_parked"
 )
 
 // maxErrMessageLen 落库的上游错误摘要长度上限（rune）。
