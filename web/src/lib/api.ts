@@ -413,3 +413,121 @@ export interface PriceSyncPreviewItem {
   current_prompt_price?: number
   current_completion_price?: number
 }
+
+// ---- WorkBuddy 自动化（/api/workbuddy/*）----
+
+/** 自动化任务标识：7 个内置任务 */
+export type WorkbuddyJobKey =
+  | 'checkin' | 'credits' | 'daily_chat' | 'growth' | 'night' | 'cat' | 'daily_chat_web'
+
+/** 各任务的启用位（与 settings.jobs_enabled 一一对应） */
+export interface WorkbuddyJobFlags {
+  checkin: boolean
+  credits: boolean
+  daily_chat: boolean
+  growth: boolean
+  night: boolean
+  cat: boolean
+  daily_chat_web: boolean
+}
+
+/** 用户级 WorkBuddy 设置（出站身分 / 脱敏档位 / 指纹 / 任务开关） */
+export interface WorkbuddySettings {
+  enabled: boolean
+  /** 保留积分：低于该值时暂停消耗积分的任务；0 = 不保留 */
+  reserve_credits: number
+  /** 每日 token 上限；0 = 不限 */
+  daily_token_limit: number
+  /** 出站身分：模拟的官方客户端类型 */
+  product: 'workbuddy' | 'vscode' | 'cli'
+  /** 脱敏档位：off 关闭 / shadow 仅统计 / on 改写 */
+  scrub_mode: 'off' | 'shadow' | 'on'
+  /** 设备指纹开关（合成指纹，仅用于降低多账号关联） */
+  fingerprint: boolean
+  jobs_enabled: WorkbuddyJobFlags
+}
+
+/** 渠道运行态（积分 / 当日 token / 暂停原因 / 模型冷却） */
+export interface WorkbuddyChannel {
+  provider_id: number
+  name: string
+  realm: 'intl' | 'cn'
+  /** 后端只回账号前缀（已脱敏） */
+  account: string
+  nickname: string
+  credits: number
+  credits_at?: string
+  daily_tokens: number
+  tokens_date?: string
+  /** 暂停原因：'' | disabled | daily_limit | reserve_credits | cooldown */
+  parked_reason?: string
+  /** 模型级冷却：{ 模型名 → 恢复时刻 ISO } */
+  cooldowns?: Record<string, string>
+  last_ok_at?: string
+}
+
+/** 单条任务执行记录（后端已按时间倒序、最多 50 条） */
+export interface WorkbuddyRun {
+  job_key: string
+  provider_id: number
+  /** 触发方式：schedule | manual */
+  trigger: string
+  /** ok | skipped | failed | parked */
+  status: 'ok' | 'skipped' | 'failed' | 'parked'
+  message: string
+  started_at: string
+  finished_at: string
+}
+
+export interface WorkbuddyOverview {
+  settings: WorkbuddySettings
+  /** 平台级 kill switch：jobs_allowed=false 时任务开关必须置灰 */
+  platform: { jobs_allowed: boolean }
+  channels: WorkbuddyChannel[]
+  runs: WorkbuddyRun[]
+}
+
+/** 手动刷新积分结果（POST channels/{id}/credits） */
+export interface WorkbuddyCreditsResult {
+  credits: number
+  credits_at: string
+}
+
+/** 单渠道任务执行结果（POST jobs/{key}/run） */
+export interface WorkbuddyRunItemResult {
+  provider_id: number
+  status: string
+  message: string
+}
+
+export interface WorkbuddyRunResponse {
+  results: WorkbuddyRunItemResult[]
+}
+
+/** 设置 PATCH 入参：任意子集；jobs_enabled 也可只传部分任务位 */
+export type WorkbuddySettingsPatch = Partial<Omit<WorkbuddySettings, 'jobs_enabled'>> & {
+  jobs_enabled?: Partial<WorkbuddyJobFlags>
+}
+
+/** 拉取 WorkBuddy 总览（设置 + 渠道运行态 + 最近执行日志） */
+export function getWorkbuddyOverview(): Promise<WorkbuddyOverview> {
+  return api.get<WorkbuddyOverview>('/api/workbuddy/overview')
+}
+
+/** 局部更新 WorkBuddy 设置 */
+export function updateWorkbuddySettings(patch: WorkbuddySettingsPatch): Promise<{ ok: boolean }> {
+  return api.patch<{ ok: boolean }>('/api/workbuddy/settings', patch)
+}
+
+/** 手动刷新单个渠道的积分快照 */
+export function refreshWorkbuddyCredits(providerId: number): Promise<WorkbuddyCreditsResult> {
+  return api.post<WorkbuddyCreditsResult>(`/api/workbuddy/channels/${providerId}/credits`)
+}
+
+/** 立即执行任务；providerId 缺省 = 所有已启用渠道 */
+export function runWorkbuddyJob(jobKey: WorkbuddyJobKey, providerId?: number): Promise<WorkbuddyRunResponse> {
+  return api.post<WorkbuddyRunResponse>(
+    `/api/workbuddy/jobs/${jobKey}/run`,
+    providerId === undefined ? {} : { provider_id: providerId },
+  )
+}

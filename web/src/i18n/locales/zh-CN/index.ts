@@ -12,6 +12,7 @@ import adminPrices from './adminPrices'
 import adminSettings from './adminSettings'
 import adminProviders from './adminProviders'
 import requestErrors from './requestErrors'
+import workbuddy from './workbuddy'
 
 export default {
   common,
@@ -27,4 +28,5 @@ export default {
   adminSettings,
   adminProviders,
   requestErrors,
+  workbuddy,
 }

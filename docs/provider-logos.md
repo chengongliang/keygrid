@@ -17,7 +17,7 @@
 | iflow.png | `iflow` | 心流 iFlow OAuth |
 | qoder.png | `qoder` | Qoder OAuth |
 | trae.png | `trae` | Trae OAuth |
-| codebuddy-cn.png | `codebuddy-cn` | 腾讯 CodeBuddy OAuth |
+| codebuddy-cn.png | `codebuddy-cn` | 腾讯 CodeBuddy OAuth；`workbuddy-intl` 复用该素材 |
 | glm.png | `glm` | 智谱 GLM |
 | deepseek.png | `deepseek` | DeepSeek |
 | siliconflow.png | `siliconflow` | 硅基流动 |

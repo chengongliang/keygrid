@@ -8,6 +8,7 @@ import type { Provider } from '@/lib/api'
 const ICON_ALIASES: Record<string, string> = {
   qianfan: 'baidu', // 百度千帆
   hunyuan: 'tencent', // 腾讯混元
+  'workbuddy-intl': 'codebuddy-cn', // WorkBuddy 国际站复用腾讯 CodeBuddy 图标（同品牌家族）
 }
 
 // api_key 渠道按 base_url host 匹配预设平台（与后端 presets.go 的 base_url 对应；
@@ -25,6 +26,9 @@ const HOST_HINTS: [suffix: string, platform: string][] = [
   ['api.kimi.com', 'kimi'],
   ['chatgpt.com', 'openai'],
   ['api.anthropic.com', 'anthropic'],
+  // WorkBuddy / CodeBuddy 同属腾讯品牌：国际站与 copilot.tencent.com 复用 codebuddy-cn 图标
+  ['workbuddy.ai', 'codebuddy-cn'],
+  ['copilot.tencent.com', 'codebuddy-cn'],
 ]
 
 // 会话级失败缓存（运行时 only，刷新页面即重置）

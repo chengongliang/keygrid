@@ -2,12 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   Server, KeyRound, BarChart3, Users2, Gauge, SlidersHorizontal,
   Settings, Menu, LogOut, ChevronRight, DollarSign, Activity,
-  PanelLeftClose, PanelLeftOpen,
+  PanelLeftClose, PanelLeftOpen, Bot,
 } from 'lucide-react'
 import Login from '@/pages/Login'
 import Providers from '@/pages/Providers'
 import ApiKeys from '@/pages/ApiKeys'
 import Usage from '@/pages/Usage'
+import WorkBuddy from '@/pages/WorkBuddy'
 import SettingsPage from '@/pages/Settings'
 import AdminUsers from '@/pages/AdminUsers'
 import AdminProviders from '@/pages/AdminProviders'
@@ -19,7 +20,7 @@ import { ThemeToggle } from '@/lib/theme'
 import { LanguageToggle } from '@/i18n/LanguageToggle'
 import { useTranslation } from 'react-i18next'
 
-type Tab = 'providers' | 'keys' | 'usage' | 'settings' | 'admin_users' | 'admin_providers' | 'admin_usage' | 'admin_prices' | 'admin_settings'
+type Tab = 'providers' | 'keys' | 'workbuddy' | 'usage' | 'settings' | 'admin_users' | 'admin_providers' | 'admin_usage' | 'admin_prices' | 'admin_settings'
 
 // 侧边栏分组导航（参考 dashboard 模板：分组标题 + 图标项 + 底部固定项）
 // label/title 存 i18n key，渲染处用 t() 转换（语言切换时重渲染生效）
@@ -29,6 +30,7 @@ const SECTION_MAIN = [
     items: [
       { key: 'providers' as Tab, labelKey: 'app.tabProviders', icon: Server },
       { key: 'keys' as Tab, labelKey: 'app.tabKeys', icon: KeyRound },
+      { key: 'workbuddy' as Tab, labelKey: 'workbuddy.title', icon: Bot },
     ],
   },
   {
@@ -55,6 +57,7 @@ const SECTION_ADMIN = [
 const TAB_KEY: Record<Tab, string> = {
   providers: 'app.tabProviders',
   keys: 'app.tabKeys',
+  workbuddy: 'workbuddy.title',
   usage: 'app.tabUsage',
   settings: 'app.tabSettings',
   admin_users: 'app.tabAdminUsers',
@@ -335,6 +338,7 @@ export default function App() {
           <div className="mx-auto max-w-6xl">
             {activeTab === 'providers' && <Providers />}
             {activeTab === 'keys' && <ApiKeys />}
+            {activeTab === 'workbuddy' && <WorkBuddy />}
             {activeTab === 'usage' && <Usage />}
             {activeTab === 'settings' && <SettingsPage user={user} onLogout={logout} />}
             {activeTab === 'admin_users' && <AdminUsers />}
