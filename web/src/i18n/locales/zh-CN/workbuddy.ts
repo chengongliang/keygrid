@@ -59,6 +59,19 @@ export default {
   parkCooldownUntil: '预计恢复时间 {{time}}',
   cooldownUntil: '{{model}} 恢复时间 {{time}}',
 
+  // ---- 渠道页徽章（Providers 页复用同一套 parked_reason 词汇）----
+  parkedDisabled: '已停用：用户关闭',
+  parkedDailyLimit: '已停用：当日限额',
+  parkedReserve: '已停用：保留积分',
+  parkedCooldown: '已停用：限流冷却',
+  parkedDisabledTitle: '该渠道已被你手动关闭，WorkBuddy 任务不会在其上运行。',
+  parkedDailyLimitTitle: '该渠道当日 token 已达上限，WorkBuddy 任务今日不会在其上运行。',
+  parkedReserveTitle: '该渠道积分已低于「保留积分」阈值，WorkBuddy 任务不会消耗其积分。',
+  parkedCooldownTitle: '该渠道正在限流冷却中，WorkBuddy 任务会暂时跳过。',
+  parkedUnknownTitle: '该渠道已停用：{{reason}}',
+  lowCredits: '积分 {{credits}}',
+  lowCreditsTitle: '该渠道积分 {{credits}} 已低于「保留积分」阈值 {{reserve}}，消耗积分的任务将暂停。',
+
   // ---- 任务区 ----
   jobsTitle: '自动化任务',
   jobsPlatformOff: '平台已禁用自动化任务，任务开关暂不可用',

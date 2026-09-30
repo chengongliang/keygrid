@@ -59,6 +59,19 @@ export default {
   parkCooldownUntil: 'Expected recovery at {{time}}',
   cooldownUntil: '{{model}} recovers at {{time}}',
 
+  // ---- Providers page badge (same parked_reason vocabulary) ----
+  parkedDisabled: 'Parked: manually off',
+  parkedDailyLimit: 'Parked: daily limit',
+  parkedReserve: 'Parked: reserve credits',
+  parkedCooldown: 'Parked: rate-limit cooldown',
+  parkedDisabledTitle: 'This channel was manually turned off, so WorkBuddy jobs will not run on it.',
+  parkedDailyLimitTitle: 'This channel has reached its daily token limit, so WorkBuddy jobs will not run on it today.',
+  parkedReserveTitle: 'This channel\'s credits are below the reserve-credits threshold, so credit-consuming jobs are paused.',
+  parkedCooldownTitle: 'This channel is cooling down after rate limiting, so WorkBuddy jobs will skip it for now.',
+  parkedUnknownTitle: 'This channel is parked: {{reason}}',
+  lowCredits: 'Credits {{credits}}',
+  lowCreditsTitle: 'This channel has {{credits}} credits, below the reserve-credits threshold of {{reserve}}; credit-consuming jobs are paused.',
+
   // ---- Jobs ----
   jobsTitle: 'Automation jobs',
   jobsPlatformOff: 'Automation jobs are disabled platform-wide; toggles are unavailable',

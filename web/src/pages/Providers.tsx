@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import i18n from '@/i18n'
-import { api, ApiError, type BeginResult, type FetchModelsResult, type ModelPrice, type Provider, type ProvidersMeta, type ProviderPreset, type QuotaData, type QuotaSnapshot, type QuotaWindow, type TestModelResult } from '@/lib/api'
+import { api, ApiError, getWorkbuddyOverview, type BeginResult, type FetchModelsResult, type ModelPrice, type Provider, type ProvidersMeta, type ProviderPreset, type QuotaData, type QuotaSnapshot, type QuotaWindow, type TestModelResult, type WorkbuddyOverview } from '@/lib/api'
 import ProviderLogo from '@/components/ProviderLogo'
 import { Markdown } from '@/components/Markdown'
 import { ProvidersHealthView } from '@/components/providers-health-view'
@@ -134,6 +134,21 @@ const protocolLabel = (proto: string): string => {
   return k ? i18n.t(k) : proto
 }
 
+// ---- WorkBuddy / CodeBuddy 渠道徽章 ----
+// 判定与 providerIcons 的图标别名同源：workbuddy-intl（国际站）与 codebuddy-cn（国内站）属同一品牌家族。
+const WORKBUDDY_OAUTH_PROVIDERS = new Set(['workbuddy-intl', 'codebuddy-cn'])
+const isWorkbuddyProvider = (p: Provider): boolean =>
+  p.kind === 'oauth' && WORKBUDDY_OAUTH_PROVIDERS.has(p.oauth_provider ?? '')
+
+// parked_reason → 徽章文案/悬停说明的 i18n key（与 WorkBuddy.tsx 的 parkBadge 同一套词汇）。
+// 未识别的原因原样展示，不隐藏。
+const WB_PARK_KEYS: Record<string, { label: string; title: string }> = {
+  disabled: { label: 'workbuddy.parkedDisabled', title: 'workbuddy.parkedDisabledTitle' },
+  daily_limit: { label: 'workbuddy.parkedDailyLimit', title: 'workbuddy.parkedDailyLimitTitle' },
+  reserve_credits: { label: 'workbuddy.parkedReserve', title: 'workbuddy.parkedReserveTitle' },
+  cooldown: { label: 'workbuddy.parkedCooldown', title: 'workbuddy.parkedCooldownTitle' },
+}
+
 // ---- 额度展示（openai codex /wham/usage 同步快照）----
 
 // 窗口标签映射（weekly=周限额、5h=5小时窗口）；模块级常量存 i18n key
@@ -199,6 +214,9 @@ export default function Providers() {
   const [quotaMap, setQuotaMap] = useState<Record<number, QuotaSnapshot>>({})
   const [quotaModal, setQuotaModal] = useState<Provider | null>(null)
   const [quotaRefreshing, setQuotaRefreshing] = useState(false)
+  // WorkBuddy/CodeBuddy 渠道徽章数据：仅在列表里确有此类渠道时拉取一次并缓存，失败静默（不展示徽章）
+  const [wbOverview, setWbOverview] = useState<WorkbuddyOverview | null>(null)
+  const wbFetchedRef = useRef(false)
 
   // 模型探测弹窗（拉取上游模型列表 + 单模型可用性测试）
   const [modelsModal, setModelsModal] = useState<Provider | null>(null)
@@ -302,7 +320,15 @@ export default function Providers() {
   const load = () => {
     setLoading(true)
     api.get<Provider[]>('/api/providers')
-      .then((d) => setList(d ?? []))
+      .then((d) => {
+        const providers = d ?? []
+        setList(providers)
+        // 无 WorkBuddy/CodeBuddy 渠道时完全跳过总览请求；有则只拉一次（ref 去重，失败静默）
+        if (!wbFetchedRef.current && providers.some(isWorkbuddyProvider)) {
+          wbFetchedRef.current = true
+          getWorkbuddyOverview().then(setWbOverview).catch(() => {})
+        }
+      })
       .catch((e) => setErr(e.message))
       .finally(() => setLoading(false))
     // 额度快照独立加载（失败静默：额度条不展示即可，不影响渠道列表）
@@ -674,6 +700,31 @@ export default function Providers() {
   // 禁用渠道沉底：启用的排前面（组内保持原有顺序），两组之间画一条分割线
   const sortedList = [...list].sort((a, b) => Number(b.enabled) - Number(a.enabled))
 
+  // WorkBuddy/CodeBuddy 渠道徽章：停用原因（警告色）优先，其次是低于「保留积分」阈值的积分；
+  // 健康渠道返回 null（不占位，保持列表干净）。
+  const wbBadgeFor = (p: Provider): { cls: string; text: string; title: string } | null => {
+    if (!wbOverview || !isWorkbuddyProvider(p)) return null
+    const ch = wbOverview.channels.find((c) => c.provider_id === p.id)
+    if (!ch) return null
+    const reason = ch.parked_reason ?? ''
+    if (reason) {
+      const keys = WB_PARK_KEYS[reason]
+      return keys
+        ? { cls: 'badge-yellow', text: t(keys.label), title: t(keys.title) }
+        // 未识别的原因照原样展示，避免把问题藏起来
+        : { cls: 'badge-yellow', text: reason, title: t('workbuddy.parkedUnknownTitle', { reason }) }
+    }
+    const reserve = wbOverview.settings.reserve_credits
+    if (Number.isFinite(ch.credits) && Number.isFinite(reserve) && ch.credits < reserve) {
+      return {
+        cls: 'badge-yellow',
+        text: t('workbuddy.lowCredits', { credits: ch.credits }),
+        title: t('workbuddy.lowCreditsTitle', { credits: ch.credits, reserve }),
+      }
+    }
+    return null
+  }
+
   return (
     <div>
       <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
@@ -720,7 +771,12 @@ export default function Providers() {
                 <div className="flex min-w-0 items-center gap-2.5">
                   <ProviderLogo platform={resolveProviderPlatform(p)} name={p.name} size={36} />
                   <div className="min-w-0">
-                    <div className="truncate font-medium" title={p.name}>{p.name}</div>
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <span className="truncate font-medium" title={p.name}>{p.name}</span>
+                      {(() => { const b = wbBadgeFor(p); return b ? (
+                        <span className={`${b.cls} shrink-0 whitespace-nowrap`} title={b.title}>{b.text}</span>
+                      ) : null })()}
+                    </div>
                     <div className="mt-0.5 text-xs text-muted">
                       {p.kind === 'oauth' ? `OAuth · ${p.oauth_provider}` : 'API Key'} · {protocolLabel(p.protocol)}
                     </div>
