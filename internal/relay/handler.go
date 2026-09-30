@@ -106,10 +106,21 @@ func (h *Handler) SetQuotaSyncer(s *quota.Syncer) { h.QuotaSyncer = s }
 type WorkbuddyGate interface {
 	Admit(p *model.Provider, upModel string) error
 	Observe(ev workbuddy.Event)
+	// ScrubModeFor 该渠道当前生效的脱敏档位（off/shadow/on，见 workbuddy/scrub.go）。
+	ScrubModeFor(p *model.Provider) string
 }
 
 // SetWorkbuddy 注入 WorkBuddy/CodeBuddy 运行态判定器（nil = 不启用）。
 func (h *Handler) SetWorkbuddy(rt WorkbuddyGate) { h.Workbuddy = rt }
+
+// workbuddyScrubMode 读取渠道脱敏档位，nil 安全：未接线（h.Workbuddy == nil）一律 off。
+// 结果统一过 ScrubModeOf 归一，未知值保守回落 off。
+func (h *Handler) workbuddyScrubMode(p *model.Provider) string {
+	if h.Workbuddy == nil {
+		return workbuddy.ScrubOff
+	}
+	return workbuddy.ScrubModeOf(h.Workbuddy.ScrubModeFor(p))
+}
 
 // ---- 入口 handlers ----
 
@@ -408,6 +419,10 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 					continue
 				}
 				wbExtra = hdrs
+				// WAF 指纹脱敏（docs/workbuddy-integration-design.md §3.4）：
+				// off 零开销；shadow 只统计；on 改写并写审计。任何失败都保留
+				// 原 body —— 绝不因脱敏让请求发不出去。
+				upstreamBody = h.applyWorkbuddyScrub(cand.provider, upstreamBody)
 			}
 		}
 

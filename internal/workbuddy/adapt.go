@@ -1,6 +1,7 @@
 package workbuddy
 
 import (
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -151,4 +152,36 @@ func AdaptRequest(p *model.Provider, pivot []byte, upModel string, clientStream 
 // HeaderOptFor 构造默认身分头选项（P5 起接入用户配置的设备指纹开关）。
 func HeaderOptFor() HeaderOpt {
 	return HeaderOpt{Product: DefaultProduct(), Fingerprint: Fingerprint()}
+}
+
+// scrubLogOnce 用户设置读取失败只告警一次：转发热路径不能因同一故障反复刷日志。
+var scrubLogOnce sync.Once
+
+// ScrubModeFor 返回该渠道当前生效的脱敏档位（用户设置优先，未设置跟随 WORKBUDDY_SCRUB，默认 off）。
+//
+// 判定顺序：用户 settings.scrub_mode（非空）→ WORKBUDDY_SCRUB 环境默认 → off。
+// 任何读失败都回落到环境默认（与 Admit 同一 fail-open 原则：状态读不出来不能让
+// 转发受影响；同时"读不到设置"绝不能误开脱敏去改写用户内容）。nil runtime /
+// nil provider 一律 off。读设置走既有的 db() 测试接缝，单测无需真实 DB。
+func (r *Runtime) ScrubModeFor(p *model.Provider) string {
+	if r == nil || r.Op == nil || p == nil {
+		return ScrubOff
+	}
+	envDefault := ScrubModeOf(os.Getenv("WORKBUDDY_SCRUB"))
+	db := r.db()
+	if db == nil {
+		return envDefault
+	}
+	settings, err := db.GetWorkbuddySetting(p.UserID)
+	if err != nil {
+		scrubLogOnce.Do(func() {
+			log.Printf("[workbuddy] scrub settings read failed provider=%d: %v (fallback env=%s)", p.ID, err, envDefault)
+		})
+		return envDefault
+	}
+	// 未设置 / 空串都表示"用户没表态"→ 跟随环境默认；未知值由 ScrubModeOf 归一到 off。
+	if settings == nil || strings.TrimSpace(settings.ScrubMode) == "" {
+		return envDefault
+	}
+	return ScrubModeOf(settings.ScrubMode)
 }
