@@ -1,4 +1,6 @@
 bin/
+# go build ./... 会在仓库根落下同名二进制（Makefile 产物在 bin/ 下）
+/keygrid
 web/node_modules/
 # dist 由构建生成，仅保留占位文件保证 fresh clone 可编译（//go:embed all:dist）
 web/dist/*
