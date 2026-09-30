@@ -585,10 +585,11 @@ if err := workbuddy.Admit(cand.provider, cand.upModel, wbDeps); err != nil {
 
 ### P3：低风险自动化
 
-- [ ] `jobs.go` + `Tick` + 接线点 8；幂等锁、错峰、超时、kill switch、审计
-- [ ] `checkin` / `credits` / `daily_chat`
-- [ ] 前端任务开关 + 立即执行 + 执行日志
-- **验收**：并发触发只执行一次（Redis 锁单测）；kill switch 生效；任务失败不污染渠道熔断状态
+- [x] `jobs.go` + `Tick` + 接线点 8；幂等锁、错峰（0–30s 抖动 + 并发 4）、超时、kill switch（平台设置优先于 env）、双写审计
+- [x] `checkin` / `credits` / `daily_chat`（默认全关；INTL 无签到端点、CN 无 daily_chat 一并如实 skipped）
+- [x] 前端任务开关 + 立即执行 + 执行日志（P2 已建，P3 起真实生效）+ 管理端「自动化任务总闸」
+- **验收**：并发触发只执行一次（Redis 锁 + 锁竞争单测）；kill switch 三层优先级单测；手动路径不抖动；
+  任务失败只写运行日志与审计，不触碰熔断状态（任务路径不经 relay 熔断器）
 
 ### P4：高风险自动化（全量）
 
