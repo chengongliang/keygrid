@@ -570,17 +570,18 @@ if err := workbuddy.Admit(cand.provider, cand.upModel, wbDeps); err != nil {
 - [x] relay 接线点 1–5；`upstreamCall` 增加 `extra http.Header` + `forceStream bool`（4 个调用点已同步）
 - [x] 预设：新增 `workbuddy-intl`，修正 `codebuddy-cn`（base_url 只留 host）；存量渠道 base_url 幂等归一化
 - [x] `.env.example` 增补 `WORKBUDDY_*` 四项
-- [ ] 内嵌模型快照 + `FetchModels` + 接线点 9（`catalog.go`）
-- [ ] relay 侧 httptest 契约测试（断言请求路径 / 身分头 / `stream:true` / 非流聚合）
+- [x] 内嵌模型快照 + `FetchModels` + 接线点 9（`catalog.go`，四段回落 /v3/config → 窄端点 → 快照）
+- [x] relay 侧 httptest 契约测试（断言请求路径 / 身分头 / `stream:true` / 非流聚合）
+- [ ] `E2E_MODE` 打桩下的五路径矩阵 + 真实账号手测（P0 门禁未过，暂缺）
 - **验收**：chat 流式/非流、`/v1/messages`、`/v1/responses`、工具调用、429 failover 到第二条渠道 —— 五条路径在 `E2E_MODE` 打桩下全绿；真实账号手测一次成功；`request_errors` 无正文
 
 ### P2：运行态（限额/积分/冷却）
 
-- [ ] `workbuddy_settings` / `workbuddy_channel_state` / `workbuddy_job_runs` 三表 + `op` 方法（全部带 user_id）
-- [ ] `Admit` + 全 parked 的 429/Retry-After；日 token 聚合；保留积分；模型冷却；`Observe`
-- [ ] `ProbeCredits` + 手动刷新 + 15min 缓存；接线点 7、10
-- [ ] 前端：WorkBuddy 页（运行态部分）+ 渠道徽章 + i18n 双语言 + logo
-- **验收**：parked 渠道被跳过并 fallback 生效；跨用户读不到运行态（隔离单测）；`make test` + `npx tsc --noEmit` 全绿
+- [x] `workbuddy_settings` / `workbuddy_channel_state` / `workbuddy_job_runs` 三表 + `op` 方法（全部带 user_id）
+- [x] `Admit` + 全 parked 的 429/Retry-After；日 token 聚合；保留积分；模型冷却；`Observe`（69 项单测，无需 PG/Redis）
+- [x] `ProbeCredits` + 手动刷新 + 15min 缓存；接线点 7、10（响应形状待 P0 探针确认）
+- [x] 前端：WorkBuddy 页（设置 / 运行态 / 任务开关 / 执行日志）+ i18n 双语言 + 图标复用（渠道徽章留待 P2 收尾）
+- **验收（已完成的部分）**：parked 渠道被跳过并 fallback 生效（三入口实测）；跨用户读不到运行态（真库隔离实测：用户 B 拿不到用户 A 的渠道，404）；`make test` + `npx tsc --noEmit` 全绿
 
 ### P3：低风险自动化
 

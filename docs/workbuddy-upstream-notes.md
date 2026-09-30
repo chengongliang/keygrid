@@ -154,3 +154,21 @@ WB_UPSTREAM=http://127.0.0.1:9999 WB_BILLING=http://127.0.0.1:9999 bash scripts/
 | 采集人确认：未写入 token / prompt / 响应正文 | ☐ |
 | 复核人 | |
 | 结论是否足以支撑实现（门槛：A1–A3 + A7–A9 有结论，错误码字典覆盖 11128/6004） | ☐ 是 ☐ 否，还缺： |
+
+---
+
+## 附录：P2 实测记录（本地烟测，非真实上游）
+
+在隔离库（`keygrid_wb_smoke`，用完即删）里对**假渠道**（无凭据、base_url 指向
+`https://www.workbuddy.ai`）做的接线验证 —— 目的是证明「拦截发生在该发生的地方」，
+**不代表任何上游协议事实**：
+
+| 场景 | 结果 |
+| --- | --- |
+| 用户关闭总开关（`settings.enabled=false`） | chat / messages / responses 三入口均被拦在上游调用之前，返回 `channel WB smoke parked: disabled`；`request_errors.kind = channel_parked`（provider_id 正确） |
+| 用户打开总开关但无凭据 | 请求继续走到凭据解密，`credential` 分类（证明拦截确实只发生在准入层） |
+| 跨用户访问 | 用户 B 的 overview 只含自己的渠道；用自己的 token 访问用户 A 的渠道 ID → 404 |
+| 设置校验 | 非法 `product` / 未知任务键 → 400；`jobs_enabled` 局部合并不清空其他键 |
+
+仍待真实账号补齐：`/v3/config` 与积分接口的**真实响应形状**（A9 的 `remaining`
+候选键名未命中时，用 `ProbeCredits` 报出的键名清单收敛），以及 A1–A3 / A7–A8。
