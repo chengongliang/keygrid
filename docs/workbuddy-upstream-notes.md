@@ -172,3 +172,20 @@ WB_UPSTREAM=http://127.0.0.1:9999 WB_BILLING=http://127.0.0.1:9999 bash scripts/
 
 仍待真实账号补齐：`/v3/config` 与积分接口的**真实响应形状**（A9 的 `remaining`
 候选键名未命中时，用 `ProbeCredits` 报出的键名清单收敛），以及 A1–A3 / A7–A8。
+
+## 附：授权面（state/token/refresh）实测校正
+
+真实账号首次授权时报 `begin auth failed: workbuddy state request failed (400)`，
+比对参考实现（`wb_accounts.py`）后确认是移植时漏了参数与头部，已修：
+
+| 项 | 参考实现（wb_accounts.py） | 修正前 | 修正后 |
+|---|---|---|---|
+| state URL | `POST {chat}/v2/plugin/auth/state?platform=CLI`（:1203） | 无 `?platform` → **上游 400** | 带 `?platform=CLI` |
+| 授权面 UA | `billing_ua` = `WorkBuddy/5.5.2`（:127） | chat 面 UA `WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2` | `WorkBuddy/5.5.2` |
+| Accept | `application/json, text/plain, */*`（:1208） | `application/json` | 与参考实现一致 |
+| token 轮询 | 只有 `?state=`，**不带** X-CodeBuddy-Request（:1239-1247） | 带了 `X-CodeBuddy-Request: 1` | 去掉 |
+| refresh | 额外带 `X-User-Id`/`X-Domain`/`X-CodeBuddy-Request`/`Accept-Language`（:544-553） | 只有 `X-Refresh-Token`/`X-Auth-Refresh-Source` | 补齐 |
+
+结论：**授权面（插件登录）与 chat 面是两套头部**。chat 面要 `X-Ide-*`/`X-Domain` 等
+身份头（relay 侧 `workbuddy.Headers`），授权面用 `billing_ua` 那组、且 state 必须带
+`platform=CLI`。同目录 CN 适配器（`codebuddy.go`）一直是这么做的，intl 移植时漏了。

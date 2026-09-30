@@ -30,18 +30,30 @@ var (
 	workbuddyTokenURL   = envOr("WORKBUDDY_TOKEN_URL", "https://www.workbuddy.ai/v2/plugin/auth/token")
 	workbuddyRefreshURL = envOr("WORKBUDDY_REFRESH_URL", "https://www.workbuddy.ai/v2/plugin/auth/token/refresh")
 	workbuddyAccountURL = envOr("WORKBUDDY_ACCOUNT_URL", "https://www.workbuddy.ai/v2/plugin/login/account")
-	workbuddyUA         = "WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2"
-	workbuddyDomain     = "www.workbuddy.ai"
+	// workbuddyUA chat 面 UA（relay 侧使用，wb_accounts.py REALM_CONFIGS.intl.chat_ua）
+	workbuddyUA = "WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2"
+	// workbuddyAuthUA 授权/计费面 UA（本文件所有请求用它，对应 billing_ua）
+	workbuddyAuthUA = "WorkBuddy/5.5.2"
+	workbuddyDomain = "www.workbuddy.ai"
 )
 
-// workbuddyHeaders WorkBuddy 特征身份头（官方 CLI 同款，WAF 校验，所有上游调用必须带齐）。
-func workbuddyHeaders(extra map[string]string) http.Header {
+// workbuddyAuthHeaders 授权面（state/token/account/refresh）的请求头，逐项对齐参考实现
+// wb_accounts.py:1205-1212 / 1239-1247 / 538-546：
+//
+//	Content-Type: application/json
+//	Accept: application/json, text/plain, */*
+//	X-Requested-With: XMLHttpRequest
+//	User-Agent: WorkBuddy/5.5.2        ← 计费/插件面 UA，**不是** chat 面的 CLI UA
+//	Origin/Referer: https://www.workbuddy.ai/
+//
+// 注意这组头里没有 X-Domain / X-Ide-*：那些是 chat 面（relay 侧 workbuddy.Headers）
+// 的要求，授权面照搬反而会偏离参考实现。
+func workbuddyAuthHeaders(extra map[string]string) http.Header {
 	h := http.Header{}
 	h.Set("Content-Type", "application/json")
-	h.Set("Accept", "application/json")
+	h.Set("Accept", "application/json, text/plain, */*")
 	h.Set("X-Requested-With", "XMLHttpRequest")
-	h.Set("User-Agent", workbuddyUA)
-	h.Set("X-Domain", workbuddyDomain)
+	h.Set("User-Agent", workbuddyAuthUA)
 	h.Set("Origin", "https://"+workbuddyDomain)
 	h.Set("Referer", "https://"+workbuddyDomain+"/")
 	for k, v := range extra {
@@ -50,9 +62,9 @@ func workbuddyHeaders(extra map[string]string) http.Header {
 	return h
 }
 
-// applyWorkbuddyHeaders 把特征头逐项写入请求（http.Header 的 Set 语义）。
-func applyWorkbuddyHeaders(req *http.Request, extra map[string]string) {
-	for k, vs := range workbuddyHeaders(extra) {
+// applyWorkbuddyAuthHeaders 把授权面请求头逐项写入请求（http.Header 的 Set 语义）。
+func applyWorkbuddyAuthHeaders(req *http.Request, extra map[string]string) {
+	for k, vs := range workbuddyAuthHeaders(extra) {
 		for _, v := range vs {
 			req.Header.Set(k, v)
 		}
@@ -67,11 +79,14 @@ func (WorkBuddyIntl) Flow() oauth.FlowType { return oauth.FlowDeviceCode }
 
 // BeginAuth POST state 拿 {state, authUrl}。
 func (WorkBuddyIntl) BeginAuth(ctx context.Context, cb oauth.Callbacks, _ string) (*oauth.BeginResult, map[string]string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, workbuddyStateURL, strings.NewReader("{}"))
+	// 必须带 ?platform=CLI：上游缺该参数直接 400（参考实现 wb_accounts.py:1203
+	// start_login 的 url 拼接；同目录 codebuddy.go 的 CN 适配器也是这么做的）。
+	stateURL := workbuddyStateURL + "?" + url.Values{"platform": {"CLI"}}.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, stateURL, strings.NewReader("{}"))
 	if err != nil {
 		return nil, nil, fmt.Errorf("workbuddy state request: %w", err)
 	}
-	applyWorkbuddyHeaders(req, nil)
+	applyWorkbuddyAuthHeaders(req, nil)
 
 	resp, err := doHTTP(ctx, cb, req)
 	if err != nil {
@@ -125,7 +140,7 @@ func (WorkBuddyIntl) Resolve(ctx context.Context, cb oauth.Callbacks, temp map[s
 	if err != nil {
 		return nil, fmt.Errorf("workbuddy token poll request: %w", err)
 	}
-	applyWorkbuddyHeaders(req, map[string]string{"X-CodeBuddy-Request": "1"})
+	applyWorkbuddyAuthHeaders(req, nil)
 
 	resp, err := doHTTP(ctx, cb, req)
 	if err != nil {
@@ -183,10 +198,26 @@ func (WorkBuddyIntl) Refresh(ctx context.Context, cb oauth.Callbacks, tok *oauth
 	if err != nil {
 		return nil, fmt.Errorf("workbuddy refresh request: %w", err)
 	}
-	applyWorkbuddyHeaders(req, map[string]string{
+	// 刷新面比 state/token 多几个头（wb_accounts.py:544-553）：X-User-Id / X-Domain /
+	// X-CodeBuddy-Request / Accept-Language 都要带，缺 X-Domain 会被上游判非法请求。
+	extra := map[string]string{
 		"X-Refresh-Token":       tok.RefreshToken,
 		"X-Auth-Refresh-Source": "plugin",
-	})
+		"X-CodeBuddy-Request":   "1",
+		"Accept-Language":       "en-US",
+	}
+	if uid := strings.TrimSpace(tok.Extra["uid"]); uid != "" {
+		extra["X-User-Id"] = uid
+	}
+	reqDomain := ""
+	if tok.Extra != nil {
+		reqDomain = strings.TrimSpace(tok.Extra["domain"])
+	}
+	if reqDomain == "" {
+		reqDomain = workbuddyDomain
+	}
+	extra["X-Domain"] = reqDomain
+	applyWorkbuddyAuthHeaders(req, extra)
 
 	resp, err := doHTTP(ctx, cb, req)
 	if err != nil {
@@ -274,7 +305,7 @@ func workbuddyFetchNickname(ctx context.Context, cb oauth.Callbacks, state, acce
 	if err != nil {
 		return ""
 	}
-	applyWorkbuddyHeaders(req, map[string]string{"Authorization": "Bearer " + accessToken})
+	applyWorkbuddyAuthHeaders(req, map[string]string{"Authorization": "Bearer " + accessToken})
 	resp, err := doHTTP(ctx, cb, req)
 	if err != nil {
 		return ""

@@ -50,10 +50,12 @@ func TestWorkBuddyBeginAndPoll(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/v2/plugin/auth/state" && r.Method == http.MethodPost:
-			// 身份头必须齐全，否则 WAF 会拒绝
-			if r.Header.Get("X-Domain") != "www.workbuddy.ai" ||
+			// 授权面请求头与 ?platform=CLI 必须齐全，否则上游直接 400
+			// （对照 wb_accounts.py:1203 start_login：url 带 platform，头用 billing_ua）。
+			if r.URL.Query().Get("platform") != "CLI" ||
 				r.Header.Get("Origin") != "https://www.workbuddy.ai" ||
 				r.Header.Get("X-Requested-With") != "XMLHttpRequest" ||
+				r.Header.Get("Accept") != "application/json, text/plain, */*" ||
 				!strings.Contains(r.Header.Get("User-Agent"), "WorkBuddy/5.5.2") {
 				w.WriteHeader(403)
 				return
@@ -145,9 +147,17 @@ func TestWorkBuddyBeginAndPoll(t *testing.T) {
 	if tok.ExpiresAt.IsZero() || !tok.ExpiresAt.After(time.Now()) {
 		t.Fatalf("expiry: %v", tok.ExpiresAt)
 	}
-	// token 轮询必须带 X-CodeBuddy-Request
-	if pollHeaders.Get("X-CodeBuddy-Request") != "1" {
-		t.Fatalf("poll header X-CodeBuddy-Request missing: %v", pollHeaders)
+	// token 轮询用授权面头部（billing UA + 全 Accept）；参考实现在这一步
+	// **不带** X-CodeBuddy-Request（wb_accounts.py:1239-1247），故这里断言的是
+	// 授权面那组头，而不是 chat 面的身份头。
+	if ua := pollHeaders.Get("User-Agent"); !strings.Contains(ua, "WorkBuddy/5.5.2") {
+		t.Fatalf("poll UA = %q, want billing UA", ua)
+	}
+	if acc := pollHeaders.Get("Accept"); acc != "application/json, text/plain, */*" {
+		t.Fatalf("poll Accept = %q", acc)
+	}
+	if pollHeaders.Get("X-CodeBuddy-Request") != "" {
+		t.Fatalf("poll 不应带 chat 面身份头: %v", pollHeaders)
 	}
 }
 
@@ -185,7 +195,9 @@ func TestWorkBuddyPollTerminalError(t *testing.T) {
 
 func TestWorkBuddyRefreshRotatesToken(t *testing.T) {
 	var gotRefresh, gotSource, gotDomain string
+	var refreshExtra http.Header
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		refreshExtra = r.Header.Clone()
 		gotRefresh = r.Header.Get("X-Refresh-Token")
 		gotSource = r.Header.Get("X-Auth-Refresh-Source")
 		gotDomain = r.Header.Get("X-Domain")
@@ -215,6 +227,13 @@ func TestWorkBuddyRefreshRotatesToken(t *testing.T) {
 	}
 	if gotDomain != "www.workbuddy.ai" {
 		t.Fatalf("X-Domain = %q", gotDomain)
+	}
+	// 刷新面必须带 X-CodeBuddy-Request 与 Accept-Language（wb_accounts.py:544-553）。
+	if gotReq := refreshExtra.Get("X-CodeBuddy-Request"); gotReq != "1" {
+		t.Fatalf("X-CodeBuddy-Request = %q", gotReq)
+	}
+	if gotLang := refreshExtra.Get("Accept-Language"); gotLang != "en-US" {
+		t.Fatalf("Accept-Language = %q", gotLang)
 	}
 	if newTok.AccessToken != "at-wb2" || newTok.RefreshToken != "rt-wb-new" {
 		t.Fatalf("rotated token: %+v", newTok)
