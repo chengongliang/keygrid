@@ -593,17 +593,20 @@ if err := workbuddy.Admit(cand.provider, cand.upModel, wbDeps); err != nil {
 
 ### P4：高风险自动化（全量）
 
-- [ ] `growth` 状态机 + 事件去重 + 领奖降级域
-- [ ] `night`（夜间窗口）/ `cat`
-- [ ] `webagent.go` 的 ACP 五步链路（120s 超时、SSE 计数、conversation id 回传）
-- [ ] 前端：这些任务的开关默认灰置，开启需二次确认 + 风险文案
-- **验收**：每个任务在 `httptest` 打桩下走通全流程；ACP 有"已建会话但未跑完"的超时路径测试；`workbuddy_job_runs` 不出现任何正文
+- [x] `growth` 状态机 + 事件去重（Meta 跨重启）+ 领奖降级域（tasks_cn.go）
+- [x] `night`（23:00–08:00 窗口，窗口外不发请求）/ `cat`（status→depart→claim）
+- [x] `webagent.go` 的 ACP 五步链路（120s 超时、SSE 计数、失败回传 conversation id、取消即 join 读协程）
+- [x] 前端：这些任务的开关默认灰置，开启需二次确认 + 风险文案（P2 已建，P4 起真实生效）
+- **验收**：每个任务在 `httptest` 打桩下走通全流程（tasks_cn 10 项 + webagent 8 项，含 race）；
+  ACP 有"已建会话但未跑完/超时/取消"三条路径测试；`workbuddy_job_runs` 不出现任何正文（super-secret 断言）
 
 ### P5：通用增强
 
 - [ ] 出口代理槽位（含 SSRF 与出口 IP 测试）
-- [ ] 脱敏 `off/shadow/on` 三档 + 改写审计
-- [ ] 设备指纹稳定派生（默认关）
+- [ ] 脱敏接入转发热路径（`scrub.go` 已实现三档纯函数 + 单测，尚缺：读用户 `scrub_mode`、
+      写 `audit_log` 事件 `workbuddy.scrub`、`shadow` 档统计上报）
+- [x] 设备指纹稳定派生（默认关；`identity.go` 的 `WORKBUDDY_FINGERPRINT` 开关）
+- [x] 计费/网页域环境覆盖（`WORKBUDDY_BILLING_BASE_*` / `WORKBUDDY_WEB_BASE`，联调与 P0 探针）
 
 ---
 
