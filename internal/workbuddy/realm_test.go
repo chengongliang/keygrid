@@ -141,3 +141,32 @@ func TestNormalizeBaseRejectsGarbage(t *testing.T) {
 		}
 	}
 }
+
+// TestBillingAndWebBaseOverrides 计费/网页域不跟随渠道 base_url，
+// 只认环境变量覆盖（联调与 P0 探针用）。
+func TestBillingAndWebBaseOverrides(t *testing.T) {
+	if got := BillingBase(RealmCN); got != cnBillingBase {
+		t.Fatalf("默认国内计费域 = %q, want %q", got, cnBillingBase)
+	}
+	t.Setenv("WORKBUDDY_BILLING_BASE_CN", "http://127.0.0.1:9999/")
+	if got := BillingBase(RealmCN); got != "http://127.0.0.1:9999" {
+		t.Fatalf("覆盖后应去掉尾斜杠, got %q", got)
+	}
+	if got := BillingBase(RealmIntl); got != intlBillingBase {
+		t.Fatalf("intl 不应受 CN 变量影响, got %q", got)
+	}
+	t.Setenv("WORKBUDDY_BILLING_BASE_INTL", "http://127.0.0.1:9999")
+	if got := CreditsEndpoint(RealmIntl); got != "http://127.0.0.1:9999"+BillingPathCredits {
+		t.Fatalf("CreditsEndpoint 未走覆盖: %q", got)
+	}
+	if got, err := WebBase(RealmIntl); err != nil || got != intlChatBase {
+		t.Fatalf("默认网页域 = %q err=%v", got, err)
+	}
+	t.Setenv("WORKBUDDY_WEB_BASE", "http://127.0.0.1:9999/")
+	if got, err := WebBase(RealmIntl); err != nil || got != "http://127.0.0.1:9999" {
+		t.Fatalf("网页域未走覆盖: %q err=%v", got, err)
+	}
+	if _, err := WebBase(RealmCN); err == nil {
+		t.Fatal("国内版不应有网页通道")
+	}
+}

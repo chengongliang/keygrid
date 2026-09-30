@@ -25,6 +25,7 @@ package workbuddy
 
 import (
 	"errors"
+	"os"
 	"strings"
 
 	"github.com/chengongliang/keygrid/internal/model"
@@ -160,9 +161,20 @@ func Endpoint(p *model.Provider) (string, error) {
 
 // BillingBase 返回计费/积分上游基址（与 chat 基址可能不同域：国内版 chat 在
 // copilot.tencent.com、billing 在 codebuddy.cn）。
+//
+// 与 chat 基址不同，计费域刻意不跟随渠道的 base_url：积分/签到是供应商侧的账号
+// 账本，不是可被用户重定向的转发目标（否则一个填错 base_url 的渠道会把账号操作
+// 打到任意主机）。仅保留环境变量覆盖，供本地联调与 P0 探针把计费域指向 mock：
+// WORKBUDDY_BILLING_BASE_CN / WORKBUDDY_BILLING_BASE_INTL。
 func BillingBase(realm Realm) string {
 	if realm == RealmCN {
+		if v := strings.TrimSpace(os.Getenv("WORKBUDDY_BILLING_BASE_CN")); v != "" {
+			return strings.TrimRight(v, "/")
+		}
 		return cnBillingBase
+	}
+	if v := strings.TrimSpace(os.Getenv("WORKBUDDY_BILLING_BASE_INTL")); v != "" {
+		return strings.TrimRight(v, "/")
 	}
 	return intlBillingBase
 }
@@ -192,9 +204,14 @@ func RemoteConfigEndpoint(p *model.Provider) (string, error) {
 }
 
 // WebBase 国际版网页通道基址（ACP 打卡用；国内版无此通道）。
+//
+// 同 BillingBase：不跟随渠道 base_url，仅允许 WORKBUDDY_WEB_BASE 覆盖（联调/探针）。
 func WebBase(realm Realm) (string, error) {
 	if realm != RealmIntl {
 		return "", errors.New("web conversation channel is intl-only")
+	}
+	if v := strings.TrimSpace(os.Getenv("WORKBUDDY_WEB_BASE")); v != "" {
+		return strings.TrimRight(v, "/"), nil
 	}
 	return intlChatBase, nil
 }
