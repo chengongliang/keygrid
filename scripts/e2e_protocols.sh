@@ -120,7 +120,17 @@ echo "   ok"
 #   WORKBUDDY_ACCOUNT_URL=<mock>/v2/plugin/login/account
 #   WORKBUDDY_BILLING_BASE_INTL=<mock>      # intl 积分端点 → mock
 #   WORKBUDDY_BILLING_BASE_CN=<mock>        # CN 签到端点 → mock
+#   WORKBUDDY_REFRESH_URL=<mock>/v2/plugin/auth/token/refresh
+#   CODEBUDDY_STATE_URL=<mock>/v2/plugin/auth/state
+#   CODEBUDDY_TOKEN_URL=<mock>/v2/plugin/auth/token
+#   CODEBUDDY_REFRESH_URL=<mock>/v2/plugin/auth/token/refresh
+#   CODEBUDDY_ACCOUNT_URL=<mock>/v2/plugin/login/account
 # 这些域刻意不跟随渠道 base_url（见 internal/workbuddy/realm.go 注释），只允许环境变量覆盖。
+# 缺 CODEBUDDY_* 时 CN 渠道的 OAuth 授权会打到真实上游并失败，脚本会在 15a 前中断。
+#
+# 另外：任务幂等锁落在 Redis 且按天槽位键控，同一 Redis 上重复跑本脚本时，
+# 上一轮已执行过的任务这一轮会变成 skipped —— 本段在 15 之前会清掉任务锁，
+# 因此只需要保证「库与 Redis 是新起的或已被清理」，不必每次 FLUSHALL。
 # 本段用 /__wb_last、/__stats 调试端点断言上游收到的路径 / 身分头 / 归一化后的请求体。
 # =====================================================================================
 
@@ -148,6 +158,11 @@ wb_last_of() { curl -sf "$MOCK_DEBUG/__wb_last?path=$1" -H "$UK"; }
 wb_total_count() { curl -sf "$MOCK_DEBUG/__stats" -H "$UK" | python3 -c 'import sys,json;print(json.load(sys.stdin)["total"])'; }
 wb_chat_count() { curl -sf "$MOCK_DEBUG/__stats" -H "$UK" | python3 -c 'import sys,json;print(json.load(sys.stdin)["wb_chat"])'; }
 # 直接读 E2E 库校验运行态落库（表名是单数 workbuddy_channel_state）；容器不可用时返回空串。
+# 清空任务幂等锁（只删 *:job:* 键，不动 OAuth 刷新锁/缓存）。
+wb_flush_job_locks() {
+  ( cd "$(dirname "$0")/.." && docker compose exec -T redis redis-cli --scan --pattern '*:job:*' \
+    | tr -d '\r' | grep -v '^$' | xargs -r docker compose exec -T redis redis-cli DEL ) >/dev/null 2>&1 || true
+}
 wb_psql() { ( cd "$(dirname "$0")/.." && docker compose exec -T postgres psql -U keygrid \
   -d "${E2E_DB_NAME:-keygrid_e2e_wb}" -tAc "$1" 2>/dev/null ); }
 # 断言最近一次上游请求落在 /v2/chat/completions，且带齐 6 个 IDE 身分头。
@@ -330,8 +345,10 @@ assert_case "停用后聊天返回 429（parked）" [ "$CODE" = "429" ]
 assert_case "停用后上游零新增选路请求" [ "$BEFORE" = "$AFTER" ]
 # 停用原因必须落库：转发侧准入失败点写 workbuddy_channel_state.parked_reason，
 # 渠道面板与运维都要读它（Admit 本身只读，所以这一步只能在这里验）。
+# 注意断言对象是 wb-x 实际路由到的渠道（api_key 那条），不是 oauth 任务渠道 ——
+# 两个渠道都被停用，但只有被真正选路的渠道才会触发准入失败点。
 assert_case "停用原因已落库 parked_reason=disabled" \
-  [ "$(wb_psql "SELECT parked_reason FROM workbuddy_channel_state WHERE provider_id=$WBP_INTL_ID")" = "disabled" ]
+  [ "$(wb_psql "SELECT parked_reason FROM workbuddy_channel_state WHERE provider_id=$WBP_API_ID")" = "disabled" ]
 # 恢复准入，后续任务段需要 settings.enabled=true。
 curl -sf -X PATCH $BASE/api/workbuddy/settings -H "$WBAUTH" -H 'Content-Type: application/json' \
   -d '{"enabled":true}' >/dev/null
@@ -341,10 +358,14 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST $BASE/v1/chat/completions 
 assert_case "重新启用后聊天恢复 200" [ "$CODE" = "200" ]
 # 恢复后停用原因应由 observeSuccess 自动清空，否则面板会一直显示旧的停用原因。
 assert_case "恢复后 parked_reason 已清空" \
-  [ -z "$(wb_psql "SELECT parked_reason FROM workbuddy_channel_state WHERE provider_id=$WBP_INTL_ID")" ]
+  [ -z "$(wb_psql "SELECT parked_reason FROM workbuddy_channel_state WHERE provider_id=$WBP_API_ID")" ]
 
 # ---- 13.5 平台任务总闸（workbuddy_jobs_enabled）----
 echo "== 15. WorkBuddy 任务总闸（平台开关 OFF → ON）=="
+# 任务幂等锁在 Redis 里按「任务+用户+渠道+当天」键控：同一 Redis 上重复跑本脚本时，
+# 上一轮的手动执行会把这一轮的 run 变成 skipped（message="已在本次窗口执行"），
+# 断言随之失真。这里先清掉任务锁键，让脚本可重复执行。
+wb_flush_job_locks
 # OFF：平台设置缺省 + WORKBUDDY_JOBS 未开 → 三个任务一律被拒，且零上游调用。
 T_BEFORE=$(wb_total_count)
 for job in checkin credits daily_chat; do
