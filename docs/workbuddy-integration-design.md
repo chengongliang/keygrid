@@ -347,7 +347,7 @@ POST  /workbuddy/jobs/{job}/run  body={provider_id?} → {results:[{provider_id,
 | auth state/token/refresh | `/v2/plugin/auth/{state,token,token/refresh}` | 同 |
 | 签到 | 无 | `/v2/billing/meter/daily-checkin` |
 | 积分 | `/v2/billing/meter/get-user-resource` | 同 |
-| 成长任务 | 无 | `/v2/activity/growth/tasks` 等 |
+| 成长任务 | 无 | `/v2/activity/growth/tasks` 等（走 **chat** 基址，claim 无 `/v2`：见 §3.7） |
 | 网页会话（ACP） | `/console/as/conversations/` | 无（CN 走桌面端） |
 
 `Endpoint()` 返回 `base + "/v2/chat/completions"` —— 一条同时修掉 G1。**落地前用 P0 探针实测确认**（A1）。
@@ -471,7 +471,7 @@ if err := workbuddy.Admit(cand.provider, cand.upModel, wbDeps); err != nil {
 | CN 每日签到 | `checkin` | `POST {billing}/v2/billing/meter/daily-checkin` `{}` | 低 | 低 | P3 |
 | 积分查询 | `credits` | `POST {billing}/v2/billing/meter/get-user-resource` | 低 | 低 | P3 |
 | INTL 每日活跃打卡（桌面端） | `daily_chat` | `POST {intl}/v2/chat/completions`（低耗模型 + 短 prompt） | 低 | 中 | P3 |
-| CN 猫猫旅行 | `cat` | `GET /buddy/travel/status\|config` → `POST /depart {location_id}` → `POST /claim {}` | 中 | 中 | P4 |
+| CN 猫猫旅行 | `cat` | `GET {chat}/activity/growth/buddy/travel/status\|config` → `POST …/travel/depart {location_id}` → `POST …/travel/claim {}` | 中 | 中 | P4 |
 | CN 成长/积分任务 | `growth` | 见下 | 高 | **高** | P4 |
 | CN 夜猫子 | `night` | 同 growth + 夜间窗口 | 中 | 中–高 | P4 |
 | INTL 网页通道 ACP 打卡 | `daily_chat_web` | 见下 | 高 | 中 | P4 |
@@ -479,12 +479,20 @@ if err := workbuddy.Admit(cand.provider, cand.upModel, wbDeps); err != nil {
 **成长任务状态机**（`tasks_cn.go`，对齐 `wb_tasks.py:37-101,428-585`）：
 
 ```
-1. GET  {billing}/v2/activity/growth/tasks                     → 未接任务列表
-2. POST {billing}/v2/activity/growth/tasks/accept              → {task_codes:[...]}，每批 ≤20（wb_tasks.py:165）
-3. POST /v2/report  [事件对象...]                               → 逐类上报（wb_tasks.py:347）
-4. GET  任务进度（summary）                                     → 轮询到可领奖
-5. POST {billing}/v2/activity/growth/tasks/{code}/claim         → 次数类；400 时降级到 workbuddy.cn web 域重试
+1. GET  {chat}/v2/activity/growth/tasks                        → 未接任务列表（wb_tasks.py:104）
+2. POST {chat}/v2/activity/growth/tasks/accept                 → {task_codes:[...]}，每批 ≤20（wb_tasks.py:177）
+3. POST {chat}/v2/report  [事件对象...]                         → 逐类上报（wb_tasks.py:356）
+4. GET  {chat}/v2/activity/growth/tasks                        → 复读列表即进度轮询（wb_tasks.py:545）
+5. POST {chat}/activity/growth/tasks/{code}/claim              → 次数类（注意**无 /v2**）；
+   400 时降级到 web 域 www.workbuddy.cn + web 头重试（wb_tasks.py:248-261）
 ```
+
+> ⚠️ 端点已按参考实现（`wb_tasks.py`）校正：成长任务走 **chat 基址**
+> （CN = `copilot.tencent.com`）而**不是**计费域；claim 路径**没有 `/v2` 前缀**。
+> 本表此前的 `{billing}` 写法是设计阶段的推测，实现以 wb_tasks.py 为准。
+> 进度也没有单独的 summary 端点：wb_tasks.py 用「重新 GET 任务列表」当进度轮询；
+> `fetch_growth_summary` 的 energy/streak 端点（`wb_tasks.py:133`）不在五步状态机内，
+> 本方案不移植。
 
 14 类行为事件的构造（画布创建、灵感案例、模板使用、模型体验、多轮对话…）在 `wb_tasks.py:278-347`，`build_event` 里带专家/团队事件 id：同一批事件里 `(eventCode, id)` 必须互异，否则被上游判重。移植时：
 
