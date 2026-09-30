@@ -58,6 +58,9 @@ const (
 
 	// defaultJobTimeout 单次任务默认超时（P4 的 ACP 会覆盖为 120s）。
 	defaultJobTimeout = 60 * time.Second
+	// acpJobTimeout 网页通道 ACP 打卡单轮上限：建会话 → 连沙箱 → 跑完一轮，
+	// 比普通任务慢得多（设计文档 §3.7 规定 120s）。
+	acpJobTimeout = 120 * time.Second
 	// maxJobMessageLen Message 长度上限（WorkbuddyJobRun.Message 列宽 512）。
 	maxJobMessageLen = 512
 	// maxJobBodyBytes 读取上游响应体的上限（P3 响应都很小，防御异常大正文）。
@@ -80,7 +83,11 @@ var errJobsDisabled = errors.New("workbuddy 自动化任务已关闭（平台设
 
 // jobKeyOrder 已知任务键（顺序即面板顺序）：P3 三个；P4 的 growth/night/cat/
 // daily_chat_web 不在此列，展开时自然被忽略。
-var jobKeyOrder = []string{"checkin", "credits", "daily_chat"}
+var jobKeyOrder = []string{
+	"checkin", "credits", "daily_chat",
+	// P4 高风险任务：默认全关，逐任务开关 + 平台总闸 + 页面二次确认三重把关。
+	"growth", "night", "cat", "daily_chat_web",
+}
 
 // JobKeys 返回已知任务键（顺序即面板顺序）。返回副本，调用方改动不影响注册表。
 func JobKeys() []string { return append([]string(nil), jobKeyOrder...) }
@@ -113,6 +120,28 @@ var jobRegistry = map[string]jobSpec{
 		Timeout: defaultJobTimeout,
 		UpModel: dailyChatModel,
 		Handler: runDailyChatJob,
+	},
+	// P4：CN 成长/夜猫子/猫猫旅行 + INTL 网页通道 ACP 打卡（tasks_cn.go / webagent.go）
+	"growth": {
+		Key:     "growth",
+		Timeout: defaultJobTimeout,
+		Handler: runGrowthJob,
+	},
+	"night": {
+		Key:     "night",
+		Timeout: defaultJobTimeout,
+		Handler: runNightJob,
+	},
+	"cat": {
+		Key:     "cat",
+		Timeout: defaultJobTimeout,
+		Handler: runCatJob,
+	},
+	"daily_chat_web": {
+		Key: "daily_chat_web",
+		// ACP 单轮要建会话 + 连沙箱 + 跑完一轮，60s 不够（设计文档 §3.7 的 120s）
+		Timeout: acpJobTimeout,
+		Handler: runDailyChatWebJob,
 	},
 }
 

@@ -322,7 +322,8 @@ const dailyChatSSE = "data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"d
 
 func TestJobKeysOrderAndCopy(t *testing.T) {
 	got := JobKeys()
-	want := []string{"checkin", "credits", "daily_chat"}
+	// P3 三个 + P4 四个（顺序即面板顺序，前端 WorkbuddyJobKey 同序）
+	want := []string{"checkin", "credits", "daily_chat", "growth", "night", "cat", "daily_chat_web"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("JobKeys() = %v, want %v", got, want)
 	}
