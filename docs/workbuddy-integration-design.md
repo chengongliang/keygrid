@@ -283,16 +283,31 @@ P5 追加的通用能力（不属于 workbuddy 包）：`egress_proxies{id,user_
 
 ```go
 // router.go 的 authed group（:127-180）内新增
-authed.Get("/workbuddy/settings", wbH.GetSettings)
-authed.Patch("/workbuddy/settings", wbH.UpdateSettings)   // 启停/限额/任务开关/脱敏档位
-authed.Get("/workbuddy/channels", wbH.Channels)           // 运行态表（积分/日用量/parked）
+authed.Get("/workbuddy/overview", wbH.Overview)               // 设置 + 运行态 + 最近执行日志（页面一次拉全）
+authed.Patch("/workbuddy/settings", wbH.UpdateSettings)       // 启停/限额/身分档位/脱敏档位/逐任务开关
 authed.Post("/workbuddy/channels/{id}/credits", wbH.RefreshCredits)
-authed.Post("/workbuddy/jobs/{job}/run", wbH.RunJob)      // 手动触发（需确认）
-authed.Get("/workbuddy/jobs/runs", wbH.Runs)              // 最近执行日志
+authed.Post("/workbuddy/jobs/{job}/run", wbH.RunJob)          // 手动触发（前端二次确认）
 ```
 
+响应形状（**前端以此为准**，实现时不要各写一套）：
+
+```
+GET /workbuddy/overview →
+{ settings:{enabled,reserve_credits,daily_token_limit,product,scrub_mode,fingerprint,jobs_enabled{}},
+  platform:{jobs_allowed},                     // 平台级 kill switch，false 时前端置灰全部任务开关
+  channels:[{provider_id,name,realm,account,nickname,credits,credits_at,daily_tokens,
+             tokens_date,parked_reason,cooldowns{},last_ok_at}],
+  runs:[{job_key,provider_id,trigger,status,message,started_at,finished_at}] }
+
+PATCH /workbuddy/settings        body = settings 的任意子集 → {ok:true}
+POST  /workbuddy/channels/{id}/credits              → {credits, credits_at}
+POST  /workbuddy/jobs/{job}/run  body={provider_id?} → {results:[{provider_id,status,message}]}
+```
+
+- 用单条 `overview` 换取页面一次拉全（设置 + 运行态 + 日志），避免三个端点各自造形状。
 - 平台级 kill switch：`platform_settings` 增 `workbuddy_jobs_enabled`（admin 端可一键全停），优先级高于用户配置。
 - 插件路由全在 `SessionAuth` 之后，绝不注册 `/v1/*`（转发面只属于 relay）。
+- 渠道列表徽章（积分/当日用量/parked）留到 P2 收尾：需要 `Providers.tsx` 也拉一次 overview，先只做独立页，避免两处数据源不一致。
 
 前端（hash-tab 架构，无 react-router）：
 

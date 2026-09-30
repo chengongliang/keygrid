@@ -1,0 +1,26 @@
+{
+  "realm": "intl",
+  "capturedAt": "2026-02-14",
+  "source": "wb2a wb_catalog.py",
+  "models": [
+    "deepseek-v4.1-flash",
+    "gpt-6-astra",
+    "hy4-preview-f",
+    "hy4-preview",
+    "hy3",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+    "gpt-5.4",
+    "grok-4.7",
+    "gpt-5.3-codex",
+    "gemini-3.5-flash",
+    "glm-5.3",
+    "glm-5.3-flash",
+    "glm-5.2",
+    "kimi-k3",
+    "kimi-k2.8-preview",
+    "kimi-k2.6"
+  ]
+}
