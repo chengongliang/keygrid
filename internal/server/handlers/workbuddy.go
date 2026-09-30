@@ -111,8 +111,9 @@ func (h *WorkbuddyHandler) Overview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	out := wbOverviewDTO{Settings: toWbSettingsDTO(setting)}
-	// 自动化任务总闸：环境开关（运维排障/合规封禁）优先于用户配置。
-	out.Platform.JobsAllowed = workbuddy.JobsEnabled()
+	// 自动化任务总闸：平台设置（管理员一键全停）优先于用户配置；
+	// 总闸关闭时前端把任务开关与"立即执行"全部置灰。
+	out.Platform.JobsAllowed = h.Runtime != nil && h.Runtime.JobsAllowed()
 
 	// 渠道运行态与渠道表按 provider_id 对齐；只展示仍属于当前用户的
 	// WorkBuddy/CodeBuddy 渠道（运行态可能残留已删渠道的孤儿行）。
@@ -327,20 +328,35 @@ func (h *WorkbuddyHandler) RefreshCredits(w http.ResponseWriter, r *http.Request
 
 // RunJob POST /api/workbuddy/jobs/{job}/run —— 手动触发任务。
 //
-// P2 阶段只做"请求可被受理"的诚实回答：任务框架（P3）尚未落地，
-// 一律 501 明确拒绝，而不是静默成功（静默成功会让用户以为打卡已完成）。
+// 与调度路径共用幂等键（防连点）：同一天同一渠道同一任务只会真正执行一次，
+// 第二次返回 skipped。总闸关闭时明确拒绝（而不是假装成功）。
 func (h *WorkbuddyHandler) RunJob(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.UserID(r.Context())
 	job := chi.URLParam(r, "job")
 	if !isWbJobKey(job) {
 		resp.BadRequest(w, "未知任务: "+job)
 		return
 	}
-	if !workbuddy.JobsEnabled() {
-		resp.Error(w, http.StatusNotImplemented, http.StatusNotImplemented,
-			"自动化任务未启用（需运维开启 WORKBUDDY_JOBS，功能将在后续版本提供）")
+	if h.Runtime == nil {
+		resp.Internal(w, "运行态未初始化")
 		return
 	}
-	resp.Error(w, http.StatusNotImplemented, http.StatusNotImplemented, "自动化任务尚未实现")
+	var body struct {
+		ProviderID int64 `json:"provider_id"`
+	}
+	if r.ContentLength > 0 {
+		if err := resp.Decode(r, &body); err != nil {
+			resp.BadRequest(w, "请求体格式错误")
+			return
+		}
+	}
+	results, err := h.Runtime.RunJobs(r.Context(), userID, job, body.ProviderID, "manual")
+	if err != nil {
+		// 总闸关闭 / 触发条件不满足：403 更贴合"被策略拒绝"的语义
+		resp.Error(w, http.StatusForbidden, http.StatusForbidden, err.Error())
+		return
+	}
+	resp.Success(w, map[string]any{"results": results})
 }
 
 func (h *WorkbuddyHandler) httpClient() *http.Client {

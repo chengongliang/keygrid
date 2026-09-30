@@ -18,6 +18,7 @@ import (
 	"github.com/chengongliang/keygrid/internal/op"
 	"github.com/chengongliang/keygrid/internal/server/router"
 	"github.com/chengongliang/keygrid/internal/task"
+	"github.com/chengongliang/keygrid/internal/workbuddy"
 
 	// 注册 kimi/openai/anthropic 适配器
 	_ "github.com/chengongliang/keygrid/internal/oauth/providers"
@@ -69,6 +70,10 @@ func main() {
 		Op:        o,
 		Scheduler: oauthSched,
 		Interval:  time.Duration(cfg.OAuthScanInterval) * time.Second,
+		// WorkBuddy/CodeBuddy 自动化任务：与 relay 的准入判定共享同一份
+		// Postgres/Redis 状态（幂等键在 Redis，两个实例不会重复执行）
+		Workbuddy:         workbuddy.NewRuntime(o, rdb),
+		WorkbuddyInterval: 15 * time.Minute,
 	}
 	stopTask := runner.Start(ctx)
 	defer stopTask()
