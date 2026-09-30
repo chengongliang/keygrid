@@ -234,7 +234,7 @@ This project is open source under the [MIT](LICENSE) license.
 
 Standing on the shoulders of giants:
 
-**[9router](https://github.com/decolua/9router)**, **[octopus](https://github.com/bestruirui/octopus)**, **[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)**, **[OpenAI Codex CLI](https://github.com/openai/codex)**, **[chi](https://github.com/go-chi/chi)**, **[GORM](https://gorm.io)**, **[React](https://react.dev)**, **[Vite](https://vite.dev)** — excellent open-source projects this one borrows from and depends on.
+**[9router](https://github.com/decolua/9router)**, **[workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub)**, **[octopus](https://github.com/bestruirui/octopus)**, **[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)**, **[OpenAI Codex CLI](https://github.com/openai/codex)**, **[chi](https://github.com/go-chi/chi)**, **[GORM](https://gorm.io)**, **[React](https://react.dev)**, **[Vite](https://vite.dev)** — excellent open-source projects this one borrows from and depends on.
 
 Third-party code and asset attributions are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
