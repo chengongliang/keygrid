@@ -147,6 +147,9 @@ wb_last() { curl -sf "$MOCK_DEBUG/__wb_last" -H "$UK"; }
 wb_last_of() { curl -sf "$MOCK_DEBUG/__wb_last?path=$1" -H "$UK"; }
 wb_total_count() { curl -sf "$MOCK_DEBUG/__stats" -H "$UK" | python3 -c 'import sys,json;print(json.load(sys.stdin)["total"])'; }
 wb_chat_count() { curl -sf "$MOCK_DEBUG/__stats" -H "$UK" | python3 -c 'import sys,json;print(json.load(sys.stdin)["wb_chat"])'; }
+# 直接读 E2E 库校验运行态落库（表名是单数 workbuddy_channel_state）；容器不可用时返回空串。
+wb_psql() { ( cd "$(dirname "$0")/.." && docker compose exec -T postgres psql -U keygrid \
+  -d "${E2E_DB_NAME:-keygrid_e2e_wb}" -tAc "$1" 2>/dev/null ); }
 # 断言最近一次上游请求落在 /v2/chat/completions，且带齐 6 个 IDE 身分头。
 wb_assert_upstream_identity() { # $1 = 场景名
   local last; last=$(wb_last)
@@ -300,6 +303,18 @@ assert_case "上游模型已映射为 deepseek 系" [ "$(echo "$LAST" | j '["bod
 assert_case "注入 thinking.type=enabled" [ "$(echo "$LAST" | j '["body"]["thinking"]["type"]')" = "enabled" ]
 assert_case "注入 reasoning_effort" [ -n "$(echo "$LAST" | j '["body"]["reasoning_effort"]')" ]
 
+# ---- 13.3i 手动刷新积分：全新渠道无运行态行也必须落库（op.SetWorkbuddyCredits upsert 回归）----
+# 放在开启任务总闸之前，避免后台 Tick 抢先把运行态行建出来，保证「刷新前 0 行」可复现。
+echo "-- 13.3i 手动刷新积分（全新渠道刷新前无运行态行）"
+STATE_ROWS_BEFORE=$(wb_psql "SELECT count(*) FROM workbuddy_channel_state WHERE provider_id=$WBP_INTL_ID")
+assert_case "刷新前该 intl 渠道无运行态行" [ "$STATE_ROWS_BEFORE" = "0" ]
+assert_case "手动刷新积分回传 credits=42.5" \
+  grep -q '"credits":42.5' <<<"$(curl -sf -X POST "$BASE/api/workbuddy/channels/$WBP_INTL_ID/credits" -H "$WBAUTH")"
+assert_case "overview 记录积分 42.5（无运行态行时不再静默丢失）" \
+  grep -q '"credits":42.5' <<<"$(curl -sf $BASE/api/workbuddy/overview -H "$WBAUTH")"
+assert_case "运行态行已落库 credits=42.5" \
+  [ "$(wb_psql "SELECT credits FROM workbuddy_channel_state WHERE provider_id=$WBP_INTL_ID")" = "42.5" ]
+
 # ---- 13.4 准入负向控制：enabled=false → 429 + 零上游调用 ----
 echo "== 14. WorkBuddy 准入负向控制（停用 → 429，零上游调用）=="
 curl -sf -X PATCH $BASE/api/workbuddy/settings -H "$WBAUTH" -H 'Content-Type: application/json' \
@@ -346,7 +361,7 @@ assert_case "overview 暴露 platform.jobs_allowed=true" \
 echo "-- 15a checkin（codebuddy-cn → billing 域 /v2/billing/meter/daily-checkin）"
 R=$(curl -sf -X POST $BASE/api/workbuddy/jobs/checkin/run -H "$WBAUTH" -H 'Content-Type: application/json' \
   -d '{"provider_id":'"$WBP_CN_ID"'}')
-assert_case "checkin 执行成功（status ok）" grep -qi '"status":"ok"' <<<"$R"
+assert_case "checkin 执行成功（status ok）" grep -q '"status":"ok"' <<<"$R"
 LAST=$(wb_last_of /v2/billing/meter/daily-checkin)
 assert_case "CN checkin 打到 /v2/billing/meter/daily-checkin" [ "$(echo "$LAST" | j '["path"]')" = "/v2/billing/meter/daily-checkin" ]
 assert_case "checkin 请求体为 {}" [ "$(echo "$LAST" | j '["body"]')" = "{}" ]
@@ -356,23 +371,21 @@ assert_case "checkin 携带 X-CodeBuddy-Request" [ -n "$(echo "$LAST" | j '["hea
 echo "-- 15b credits（intl → billing 域 /v2/billing/meter/get-user-resource）"
 R=$(curl -sf -X POST $BASE/api/workbuddy/jobs/credits/run -H "$WBAUTH" -H 'Content-Type: application/json' \
   -d '{"provider_id":'"$WBP_INTL_ID"'}')
-assert_case "credits 执行成功（ProbeCredits 解析 remaining=42.5）" grep -qi '"status":"ok"' <<<"$R"
+assert_case "credits 执行成功（status ok）" grep -q '"status":"ok"' <<<"$R"
+# 任务结果 JSON 字段名契约（RunResult 带 json tag，与 web/src/lib/api.ts 对齐）。
+assert_case "任务结果字段为小写 provider_id" grep -q '"provider_id"' <<<"$R"
+refute_case "任务结果字段不再是大写 ProviderID" grep -q '"ProviderID"' <<<"$R"
 LAST=$(wb_last_of /v2/billing/meter/get-user-resource)
 assert_case "credits 打到 /v2/billing/meter/get-user-resource" [ "$(echo "$LAST" | j '["path"]')" = "/v2/billing/meter/get-user-resource" ]
 assert_case "credits body 带 ProductCode=p_tcaca" grep -q 'p_tcaca' <<<"$(echo "$LAST" | j '["body"]')"
 assert_case "credits 携带 IDE 身分头" [ -n "$(echo "$LAST" | j '["headers"]["X-Ide-Type"]')" ]
-# 直连刷新端点直接验证 ProbeCredits 的解析结果（不依赖落库顺序，见下方说明）。
-assert_case "积分刷新端点回传解析值 credits=42.5" \
-  grep -q '"credits":42.5' <<<"$(curl -sf -X POST "$BASE/api/workbuddy/channels/$WBP_INTL_ID/credits" -H "$WBAUTH")"
-# 注意（已上报的 Go 侧问题）：SetWorkbuddyCredits 是 Model+Where 的 Updates，
-# 渠道运行态行尚未创建时 0 行受影响但不报错，首次「先 credits 后聊天」会丢积分。
-# 因此这里不把 overview.credits 当硬断言；如需断言，应先把 daily_chat 跑一遍建行。
+# 积分落库/overview 已在 13.3i 断言（那里无后台 Tick 干扰）；这里只验证任务链路本身。
 
 echo "-- 15c daily_chat（intl → chat 域 /v2/chat/completions）"
 CBEFORE=$(wb_chat_count)
 R=$(curl -sf -X POST $BASE/api/workbuddy/jobs/daily_chat/run -H "$WBAUTH" -H 'Content-Type: application/json' \
   -d '{"provider_id":'"$WBP_INTL_ID"'}')
-assert_case "daily_chat 执行成功（status ok）" grep -qi '"status":"ok"' <<<"$R"
+assert_case "daily_chat 执行成功（status ok）" grep -q '"status":"ok"' <<<"$R"
 assert_case "daily_chat 新增 /v2/chat/completions 上游调用" [ "$(wb_chat_count)" -gt "$CBEFORE" ]
 LAST=$(wb_last_of /v2/chat/completions)
 assert_case "daily_chat 请求体同样强制 stream:true" [ "$(echo "$LAST" | j '["body"]["stream"]')" = "True" ]
