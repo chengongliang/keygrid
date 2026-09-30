@@ -189,3 +189,25 @@ WB_UPSTREAM=http://127.0.0.1:9999 WB_BILLING=http://127.0.0.1:9999 bash scripts/
 结论：**授权面（插件登录）与 chat 面是两套头部**。chat 面要 `X-Ide-*`/`X-Domain` 等
 身份头（relay 侧 `workbuddy.Headers`），授权面用 `billing_ua` 那组、且 state 必须带
 `platform=CLI`。同目录 CN 适配器（`codebuddy.go`）一直是这么做的，intl 移植时漏了。
+
+### 实测证据（真实上游，2026-09-30）
+
+直接对 `https://www.workbuddy.ai` 发起 state 请求，两组对照：
+
+```
+# 缺 platform（修正前的 KeyGrid 请求）
+POST /v2/plugin/auth/state            → HTTP 400
+{"code":10001,"msg":"10001:platform is empty","requestId":"..."}
+
+# 带 platform=CLI + billing UA（修正后）
+POST /v2/plugin/auth/state?platform=CLI  → HTTP 200
+{"code":0,"msg":"OK","data":{"state":"c961ec8d-...",
+ "authUrl":"https://www.workbuddy.ai/login?platform=CLI&state=c961ec8d-..."}}
+```
+
+由此**确认**（不再是假设）：
+- A-auth-1：state 端点**必须**带 `platform`（值为 `CLI`），否则 400/10001；
+- A-auth-2：返回的 `authUrl` 是 `https://www.workbuddy.ai/login?platform=CLI&state=…`，
+  即「浏览器登录 WorkBuddy 页面」——没有设备码可填，KeyGrid 侧只能给链接 + 轮询；
+- A-auth-3：`code:10001` 属参数校验类错误（区别于 `11217` 的待授权、`11128` 的渠道指纹），
+  以后遇到 10001 一律先查参数是否漏传。
