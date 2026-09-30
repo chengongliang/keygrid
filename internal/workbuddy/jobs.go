@@ -242,9 +242,11 @@ func (jc *JobContext) httpClient() *http.Client {
 
 // RunResult 一次执行的结果（回传前端与写审计）。
 type RunResult struct {
-	ProviderID int64
-	Status     string // ok | skipped | failed | parked
-	Message    string // 只允许状态摘要（≤512 rune，绝不含正文/凭据）
+	// json tag 必须与 web/src/lib/api.ts 的 WorkbuddyRunItemResult 一致
+	// （前端按 provider_id/status/message 取值，缺 tag 会写成大写字段名而丢显示）。
+	ProviderID int64  `json:"provider_id"`
+	Status     string `json:"status"`  // ok | skipped | failed | parked
+	Message    string `json:"message"` // 只允许状态摘要（≤512 rune，绝不含正文/凭据）
 }
 
 // JobsAllowed 平台级任务总闸。

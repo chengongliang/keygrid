@@ -11,6 +11,7 @@ package workbuddy
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -749,5 +750,23 @@ func assertNoLeak(t *testing.T, msg string) {
 	}
 	if strings.Contains(msg, "super-secret") {
 		t.Fatalf("Message 泄漏了上游正文: %q", msg)
+	}
+}
+
+// TestRunResultJSONTags 手写执行结果的 JSON 字段名必须与前端契约一致
+// （web/src/lib/api.ts 的 WorkbuddyRunItemResult 用 provider_id/status/message）。
+func TestRunResultJSONTags(t *testing.T) {
+	b, err := json.Marshal(RunResult{ProviderID: 7, Status: jobStatusOK, Message: "积分已刷新"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
+	for _, want := range []string{`"provider_id":7`, `"status":"ok"`, `"message":"积分已刷新"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("JSON %s 缺少 %s", got, want)
+		}
+	}
+	if strings.Contains(got, "ProviderID") {
+		t.Fatalf("字段名不应是大写 Go 名: %s", got)
 	}
 }

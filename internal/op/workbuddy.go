@@ -87,18 +87,56 @@ func (o *Op) UpsertWorkbuddyChannelState(s *model.WorkbuddyChannelState) error {
 	}).Create(s).Error
 }
 
-// SetWorkbuddyCredits 更新积分观测值。
+// SetWorkbuddyCredits 更新积分观测值（无运行态行时自动建行，见 upsertChannelStateFields）。
 func (o *Op) SetWorkbuddyCredits(userID, providerID int64, credits float64, at time.Time) error {
-	return o.DB.Model(&model.WorkbuddyChannelState{}).
-		Where("provider_id = ? AND user_id = ?", providerID, userID).
-		Updates(map[string]any{"credits": credits, "credits_at": at, "updated_at": at}).Error
+	return o.upsertChannelStateFields(userID, providerID, map[string]any{
+		"credits": credits, "credits_at": at,
+	}, at)
 }
 
 // SetWorkbuddyParked 标记/解除渠道停用（reason 为空串表示恢复正常）。
 func (o *Op) SetWorkbuddyParked(userID, providerID int64, reason string, now time.Time) error {
-	return o.DB.Model(&model.WorkbuddyChannelState{}).
-		Where("provider_id = ? AND user_id = ?", providerID, userID).
-		Updates(map[string]any{"parked_reason": reason, "updated_at": now}).Error
+	return o.upsertChannelStateFields(userID, providerID, map[string]any{
+		"parked_reason": reason,
+	}, now)
+}
+
+// upsertChannelStateFields 「只写几个字段」的运行态更新：行不存在时先补一行。
+//
+// 为什么需要：积分刷新、停用标记等路径可能先于任何转发请求发生（新接入渠道、
+// 手动点「刷新积分」、后台任务首次执行）。这些路径用 Model+Where.Updates 时，
+// 行不存在则 RowsAffected=0 且 err=nil —— 调用方以为成功，值却静默丢失。
+// 因此统一走「先更新 → 未命中则建行（ON CONFLICT DO NOTHING）→ 再更新」。
+//
+// realm 只在建行时留空：本层不能 import workbuddy（会形成循环依赖），
+// 下一次转发请求的 UpsertWorkbuddyChannelState 会按渠道 oauth_provider 补齐；
+// realm 仅用于展示，留空不影响任何判定。
+func (o *Op) upsertChannelStateFields(userID, providerID int64, fields map[string]any, now time.Time) error {
+	return o.DB.Transaction(func(tx *gorm.DB) error {
+		fields["updated_at"] = now
+		res := tx.Model(&model.WorkbuddyChannelState{}).
+			Where("provider_id = ? AND user_id = ?", providerID, userID).
+			Updates(fields)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected > 0 {
+			return nil
+		}
+		// 行不存在：建一行（并发下由 ON CONFLICT 兜住），随后重放本次更新。
+		if err := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "provider_id"}},
+			DoNothing: true,
+		}).Create(&model.WorkbuddyChannelState{
+			UserID:     userID,
+			ProviderID: providerID,
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&model.WorkbuddyChannelState{}).
+			Where("provider_id = ? AND user_id = ?", providerID, userID).
+			Updates(fields).Error
+	})
 }
 
 // AddWorkbuddyDailyTokens 累加当日 token 用量；跨天时先清零再累加。

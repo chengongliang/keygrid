@@ -600,6 +600,18 @@ if err := workbuddy.Admit(cand.provider, cand.upModel, wbDeps); err != nil {
 - **验收**：每个任务在 `httptest` 打桩下走通全流程（tasks_cn 10 项 + webagent 8 项，含 race）；
   ACP 有"已建会话但未跑完/超时/取消"三条路径测试；`workbuddy_job_runs` 不出现任何正文（super-secret 断言）
 
+#### P4 本地 E2E 证据（`scripts/e2e_protocols.sh` 第 13–15 段）
+
+mock 上游现按真实失败模式实现 `POST /v2/chat/completions`：缺 `Authorization` → 401；
+缺 `X-Ide-*` 头 → 400 `{"code":11128}`；`stream!=true` → 400 `{"code":11101}`；
+否则回 OpenAI 形态 SSE（deepseek 模型额外带 `reasoning_content`）。
+断言覆盖：五条入口路径（chat 流式/非流式、messages、responses、工具调用）全部落到
+`/v2/chat/completions` 且带齐 IDE 身份头；归一化字段（`tool_choice` 对象降级、
+`max_completion_tokens→max_tokens`、deepseek thinking、强制 stream + include_usage）
+按 mock 侧记录的实际请求体核对；准入负例（`enabled=false` → 429 且零上游请求）；
+任务总闸关→三个任务 403 且零请求、开→CN 签到/积分/每日活跃各自打到正确端点。
+最近一次：`PASS=112 FAIL=0`，`ALL PROTOCOLS E2E PASS`。
+
 ### P5：通用增强
 
 - [ ] 出口代理槽位（含 SSRF 与出口 IP 测试）
