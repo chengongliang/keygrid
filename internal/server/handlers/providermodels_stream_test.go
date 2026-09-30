@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/chengongliang/keygrid/internal/model"
 	"github.com/chengongliang/keygrid/internal/relay"
+	"github.com/chengongliang/keygrid/internal/workbuddy"
 )
 
 // providermodels_stream_test.go 流式测活 SSE 推送：delta/done 事件序列、
@@ -192,5 +194,41 @@ func TestPushStreamChat_ClientAbort(t *testing.T) {
 	}
 	if dones != 1 {
 		t.Fatalf("expect exactly one done frame, got %d", dones)
+	}
+}
+
+// TestWorkBuddyModelsFallsBackToSnapshot WorkBuddy/CodeBuddy 渠道的模型目录不能走
+// /v1/models（GET 会 404 "404 Route Not Found"），必须走 workbuddy 目录四段回落；
+// 且**不需要凭据** —— 刚建好还没授权的渠道（Op 为 nil / 无 credential）也要能拉到目录。
+//
+// 这里直接调用分支函数，避免经 ssrf 校验（那会引入 DNS 依赖，测试要离线可跑）。
+func TestWorkBuddyModelsFallsBackToSnapshot(t *testing.T) {
+	h := &TestHandler{} // Op 为 nil：模拟「无凭据来源」的新渠道
+	client := &http.Client{Timeout: time.Second}
+	p := &model.Provider{
+		ID:            0, // 未落库
+		Name:          "workbuddy-intl",
+		OAuthProvider: "workbuddy-intl",
+		BaseURL:       "https://www.workbuddy.ai",
+	}
+	if !workbuddy.IsWorkBuddy(p) {
+		t.Fatal("该渠道应被判定为 workbuddy")
+	}
+	models := h.workBuddyModels(context.Background(), client, p)
+	if len(models) == 0 {
+		t.Fatal("应回落到内嵌目录（无凭据也要有模型）")
+	}
+	// 内嵌快照里的 intl 模型应包含这几个
+	for _, want := range []string{"deepseek-v4.1-flash", "glm-5.3"} {
+		found := false
+		for _, m := range models {
+			if m == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("内嵌目录缺少 %s: %v", want, models)
+		}
 	}
 }

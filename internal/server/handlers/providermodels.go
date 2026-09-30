@@ -95,13 +95,6 @@ func (h *TestHandler) FetchUpstreamModels(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	secret, _, errMsg := h.probeSecret(p)
-	if errMsg != "" {
-		res.Error = errMsg
-		emit()
-		return
-	}
-
 	client, err := probeClient(h.Op, p.UseProxy, 30*time.Second)
 	if err != nil {
 		res.Error = err.Error()
@@ -113,6 +106,9 @@ func (h *TestHandler) FetchUpstreamModels(w http.ResponseWriter, r *http.Request
 	// docs/workbuddy-integration-design.md §3.5）：优先走 workbuddy.FetchModels
 	// 的四段回落（/v3/config → 窄端点 → 内嵌快照）；取不到时回落内嵌快照，
 	// 再取不到才走既有通用 /v1/models 路径（非 workbuddy 渠道行为完全不变）。
+	//
+	// 这一段刻意放在凭据检查之前：内嵌快照不需要凭据，刚建好、还没授权的
+	// workbuddy 渠道也应该能在表单里拉到模型目录。
 	if workbuddy.IsWorkBuddy(p) {
 		if models := h.workBuddyModels(r.Context(), client, p); len(models) > 0 {
 			res.OK = true
@@ -120,6 +116,13 @@ func (h *TestHandler) FetchUpstreamModels(w http.ResponseWriter, r *http.Request
 			emit()
 			return
 		}
+	}
+
+	secret, _, errMsg := h.probeSecret(p)
+	if errMsg != "" {
+		res.Error = errMsg
+		emit()
+		return
 	}
 
 	models, status, errMsg := fetchAndParseUpstreamModels(r.Context(), client, p.BaseURL, secret)
@@ -152,6 +155,11 @@ func (h *TestHandler) workBuddyModels(ctx context.Context, client *http.Client, 
 // workBuddyTokenSet 解密渠道凭据为 oauth.TokenSet（仅 oauth 类凭据；失败返回 nil）。
 // 复用现成的 crypto.Decrypt + oauth.TokenSetData 形状，不新增明文落库/日志路径。
 func (h *TestHandler) workBuddyTokenSet(p *model.Provider) *oauth.TokenSet {
+	// 没有凭据来源（未落库的新渠道 / 测试）时返回 nil：调用方会使用内嵌快照，
+	// 这是「快照不需要凭据」这一设计前提的落地。
+	if h.Op == nil || p == nil || p.ID == 0 {
+		return nil
+	}
 	cred, err := h.Op.GetCredentialByProviderID(p.ID)
 	if err != nil {
 		return nil
@@ -182,6 +190,9 @@ type probeModelsReq struct {
 	APIKey     string `json:"api_key"`
 	ProviderID int64  `json:"provider_id"`
 	UseProxy   bool   `json:"use_proxy"`
+	// OAuthProvider：新渠道（未落库）场景判定 WorkBuddy/CodeBuddy 区域用；
+	// 已落库渠道以 provider 行为准（该字段传入无效）。
+	OAuthProvider string `json:"oauth_provider"`
 }
 
 // ProbeModels POST /api/providers/probe_models —— 配置时探测上游模型（不要求渠道已存在）。
@@ -237,6 +248,43 @@ func (h *TestHandler) ProbeModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 代理开关：已有渠道用落库值；新增场景用请求体携带的向导勾选状态
+	useProxy := req.UseProxy
+	if p != nil {
+		useProxy = p.UseProxy
+	}
+	client, err := probeClient(h.Op, useProxy, 30*time.Second)
+	if err != nil {
+		res.Error = err.Error()
+		emit()
+		return
+	}
+
+	// WorkBuddy / CodeBuddy：模型目录不在 /v1/models（GET 会 404
+	// "404 Route Not Found"），必须走 workbuddy.FetchModels 的四段回落
+	// （/v3/config → 窄端点 → 内嵌快照）。编辑表单的「拉取模型」走的正是本接口，
+	// 因此这里必须与 FetchUpstreamModels 同策略，否则表单里点拉取必 404。
+	// 表单可能正在改 base_url：用请求里的值覆盖后再判区域（未填则用落库值）。
+	// 同样放在凭据检查之前：快照不需要凭据，未授权的渠道也要能拉到目录。
+	catalogP := p
+	if p != nil {
+		cp := *p
+		if v := strings.TrimSpace(req.BaseURL); v != "" {
+			cp.BaseURL = v
+		}
+		catalogP = &cp
+	} else if req.OAuthProvider != "" || strings.TrimSpace(req.BaseURL) != "" {
+		catalogP = &model.Provider{OAuthProvider: req.OAuthProvider, BaseURL: req.BaseURL}
+	}
+	if workbuddy.IsWorkBuddy(catalogP) {
+		if models := h.workBuddyModels(r.Context(), client, catalogP); len(models) > 0 {
+			res.OK = true
+			res.Models = models
+			emit()
+			return
+		}
+	}
+
 	// 凭据：显式 api_key 优先，否则用存储凭据
 	secret := strings.TrimSpace(req.APIKey)
 	if secret == "" {
@@ -252,18 +300,6 @@ func (h *TestHandler) ProbeModels(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		secret = s
-	}
-
-	// 代理开关：已有渠道用落库值；新增场景用请求体携带的向导勾选状态
-	useProxy := req.UseProxy
-	if p != nil {
-		useProxy = p.UseProxy
-	}
-	client, err := probeClient(h.Op, useProxy, 30*time.Second)
-	if err != nil {
-		res.Error = err.Error()
-		emit()
-		return
 	}
 
 	models, status, errMsg := fetchAndParseUpstreamModels(r.Context(), client, baseURL, secret)
