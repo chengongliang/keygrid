@@ -614,7 +614,9 @@ mock 上游现按真实失败模式实现 `POST /v2/chat/completions`：缺 `Aut
 
 ### P5：通用增强
 
-- [ ] 出口代理槽位（含 SSRF 与出口 IP 测试）
+- [x] 出口代理槽位：复用内核既有的 `UseProxy` + `Op.ProxyURL()`（relay/state.go `clientFor`）；
+      自动化任务同样尊重该开关（`jobHTTPClient`：勾了代理但平台未配置 → 任务失败而非直连），
+      保证同一账号的聊天与打卡从同一出口 IP 出去
 - [ ] 脱敏接入转发热路径（`scrub.go` 已实现三档纯函数 + 单测，尚缺：读用户 `scrub_mode`、
       写 `audit_log` 事件 `workbuddy.scrub`、`shadow` 档统计上报）
 - [x] 设备指纹稳定派生（默认关；`identity.go` 的 `WORKBUDDY_FINGERPRINT` 开关）

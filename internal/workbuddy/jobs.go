@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/chengongliang/keygrid/internal/crypto"
+	"github.com/chengongliang/keygrid/internal/httpx"
 	"github.com/chengongliang/keygrid/internal/model"
 	"github.com/chengongliang/keygrid/internal/oauth"
 	"github.com/chengongliang/keygrid/internal/op"
@@ -58,6 +59,9 @@ const (
 
 	// defaultJobTimeout 单次任务默认超时（P4 的 ACP 会覆盖为 120s）。
 	defaultJobTimeout = 60 * time.Second
+	// jobUpstreamTimeout 任务出口 client 的 HTTP 超时；单次执行的真实上限由
+	// spec.Timeout（ctx）控制，这里只兜住「连接建立后上游不响应」的极端情况。
+	jobUpstreamTimeout = 5 * time.Minute
 	// acpJobTimeout 网页通道 ACP 打卡单轮上限：建会话 → 连沙箱 → 跑完一轮，
 	// 比普通任务慢得多（设计文档 §3.7 规定 120s）。
 	acpJobTimeout = 120 * time.Second
@@ -214,6 +218,9 @@ type jobsStore interface {
 	InsertWorkbuddyJobRun(r *model.WorkbuddyJobRun) error
 	GetSetting(key string) (string, error)
 	CreateAuditLog(l *model.AuditLog)
+	// ProxyURL 平台出口代理（空串 = 未配置）。任务出口必须与转发一致，
+	// 否则同一账号会出现「聊天走代理、打卡走直连」两种出口 IP。
+	ProxyURL() (string, error)
 }
 
 // 编译期断言：op 层签名变化会在这里立刻暴露。
@@ -353,10 +360,9 @@ func (r *Runtime) runJobsAt(ctx context.Context, userID int64, jobKey string, pr
 		return nil, err
 	}
 
-	client := &http.Client{}
 	results := make([]RunResult, 0, len(providers))
 	for i := range providers {
-		res, _ := r.runForProvider(ctx, spec, store, setting, &providers[i], trigger, now, client)
+		res, _ := r.runForProvider(ctx, spec, store, setting, &providers[i], trigger, now)
 		results = append(results, res)
 	}
 	return results, nil
@@ -428,7 +434,6 @@ func (r *Runtime) Tick(ctx context.Context, now time.Time) (int, error) {
 		return 0, nil
 	}
 
-	client := &http.Client{}
 	sem := make(chan struct{}, jobConcurrency)
 	jitterSeen := make(map[string]int, len(jobKeyOrder))
 
@@ -466,7 +471,7 @@ func (r *Runtime) Tick(ctx context.Context, now time.Time) (int, error) {
 				log.Printf("[workbuddy] tick read settings failed user=%d: %v", t.userID, serr)
 				return
 			}
-			res, ran := r.runForProvider(ctx, spec, store, setting, &t.provider, "schedule", now, client)
+			res, ran := r.runForProvider(ctx, spec, store, setting, &t.provider, "schedule", now)
 			if ran {
 				mu.Lock()
 				executed++
@@ -506,7 +511,39 @@ func (r *Runtime) providersFor(store jobsStore, userID, providerID int64) ([]mod
 // runForProvider 单个（任务, 渠道）的执行核心，RunJobs 与 Tick 共用。
 //
 // 返回 ran = 是否产生了一条真实执行记录（幂等锁命中不算）。
-func (r *Runtime) runForProvider(ctx context.Context, spec jobSpec, store jobsStore, setting *model.WorkbuddySetting, p *model.Provider, trigger string, now time.Time, client *http.Client) (RunResult, bool) {
+// jobHTTPClient 任务出口客户端：与 relay/clientFor 同一套决策 ——
+// 渠道未勾代理走默认 client；勾了代理则必须拿到平台代理地址，否则报错（绝不直连）。
+// 这样同一账号的聊天与自动化任务从同一出口 IP 出去，不会互相暴露成两个来源。
+func (r *Runtime) jobHTTPClient(store jobsStore, p *model.Provider) (*http.Client, error) {
+	if p == nil || !p.UseProxy {
+		return httpx.Client(jobUpstreamTimeout, "")
+	}
+	store = orJobStore(store, r)
+	if store == nil {
+		return nil, errors.New("channel requires proxy, but proxy source is not configured")
+	}
+	proxyURL, err := store.ProxyURL()
+	if err != nil {
+		return nil, fmt.Errorf("read proxy setting: %w", err)
+	}
+	if strings.TrimSpace(proxyURL) == "" {
+		return nil, errors.New("channel requires proxy, but platform proxy is not configured")
+	}
+	return httpx.Client(jobUpstreamTimeout, proxyURL)
+}
+
+// orJobStore 优先用调用方传入的 store（测试注入），否则回落到 Runtime 自身的 op。
+func orJobStore(store jobsStore, r *Runtime) jobsStore {
+	if store != nil {
+		return store
+	}
+	if r == nil {
+		return nil
+	}
+	return r.jobStore()
+}
+
+func (r *Runtime) runForProvider(ctx context.Context, spec jobSpec, store jobsStore, setting *model.WorkbuddySetting, p *model.Provider, trigger string, now time.Time) (RunResult, bool) {
 	res := RunResult{ProviderID: p.ID}
 
 	if setting == nil || !setting.Enabled {
@@ -536,6 +573,15 @@ func (r *Runtime) runForProvider(ctx context.Context, spec jobSpec, store jobsSt
 		log.Printf("[workbuddy] job state read failed provider=%d job=%s: %v", p.ID, spec.Key, err)
 		res.Status = jobStatusFailed
 		res.Message = "读取渠道运行态失败"
+		return res, false
+	}
+	client, cerr := r.jobHTTPClient(store, p)
+	if cerr != nil {
+		release()
+		// 渠道要求代理但平台未配置：与 relay 一致地失败，不静默直连。
+		log.Printf("[workbuddy] job client build failed provider=%d job=%s: %v", p.ID, spec.Key, cerr)
+		res.Status = jobStatusFailed
+		res.Message = "出口代理不可用"
 		return res, false
 	}
 	tok, err := loadJobToken(store, p)

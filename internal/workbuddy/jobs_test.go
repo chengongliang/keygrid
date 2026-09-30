@@ -12,6 +12,7 @@ package workbuddy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -43,6 +44,9 @@ type fakeJobsDB struct {
 	audits           []*model.AuditLog
 	listErr          error
 	settingErr       error
+	// 出口代理：proxyURL 非空且渠道 UseProxy=true 时任务才走代理
+	proxyURL string
+	proxyErr error
 }
 
 func newFakeJobsDB() *fakeJobsDB {
@@ -102,6 +106,16 @@ func (f *fakeJobsDB) InsertWorkbuddyJobRun(r *model.WorkbuddyJobRun) error {
 	cp := *r
 	f.runs = append(f.runs, &cp)
 	return nil
+}
+
+// ProxyURL 平台出口代理；测试可用 proxyURL 字段模拟「渠道勾了代理」。
+func (f *fakeJobsDB) ProxyURL() (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.proxyErr != nil {
+		return "", f.proxyErr
+	}
+	return f.proxyURL, nil
 }
 
 func (f *fakeJobsDB) GetSetting(key string) (string, error) {
@@ -768,5 +782,44 @@ func TestRunResultJSONTags(t *testing.T) {
 	}
 	if strings.Contains(got, "ProviderID") {
 		t.Fatalf("字段名不应是大写 Go 名: %s", got)
+	}
+}
+
+// TestJobHTTPClientHonoursProxy 任务出口必须与转发一致：渠道勾了代理但平台未配置
+// 时宁可失败，也不静默直连（否则同一账号出现两个出口 IP）。
+func TestJobHTTPClientHonoursProxy(t *testing.T) {
+	r := NewRuntime(nil, nil)
+	p := &model.Provider{UseProxy: false}
+
+	// 未勾代理：总能拿到 client，且不读代理设置
+	c, err := r.jobHTTPClient(nil, p)
+	if err != nil || c == nil {
+		t.Fatalf("未勾代理应返回默认 client: %v", err)
+	}
+
+	// 勾了代理但平台未配置（空串）
+	db := newFakeJobsDB()
+	p.UseProxy = true
+	if _, err := r.jobHTTPClient(db, p); err == nil {
+		t.Fatal("勾了代理但平台未配置时应报错，不能直连")
+	}
+
+	// 协议不支持的代理地址会被 httpx 拒绝（平台代理地址是管理员配置的，
+	// 因此私网 IP 合法，这里只验证协议校验）
+	db.proxyURL = "ftp://127.0.0.1:1080"
+	if _, err := r.jobHTTPClient(db, p); err == nil {
+		t.Fatal("不支持的代理协议应被拒绝")
+	}
+
+	// 读代理设置失败 → 同样报错，不回落直连
+	db.proxyURL = ""
+	db.proxyErr = errors.New("db down")
+	if _, err := r.jobHTTPClient(db, p); err == nil {
+		t.Fatal("读代理设置失败时应报错")
+	}
+
+	// nil 渠道（防御）
+	if _, err := r.jobHTTPClient(db, nil); err != nil {
+		t.Fatalf("nil 渠道应按未勾代理处理: %v", err)
 	}
 }
