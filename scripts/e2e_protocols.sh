@@ -328,6 +328,10 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST $BASE/v1/chat/completions 
 AFTER=$(wb_chat_count)
 assert_case "停用后聊天返回 429（parked）" [ "$CODE" = "429" ]
 assert_case "停用后上游零新增选路请求" [ "$BEFORE" = "$AFTER" ]
+# 停用原因必须落库：转发侧准入失败点写 workbuddy_channel_state.parked_reason，
+# 渠道面板与运维都要读它（Admit 本身只读，所以这一步只能在这里验）。
+assert_case "停用原因已落库 parked_reason=disabled" \
+  [ "$(wb_psql "SELECT parked_reason FROM workbuddy_channel_state WHERE provider_id=$WBP_INTL_ID")" = "disabled" ]
 # 恢复准入，后续任务段需要 settings.enabled=true。
 curl -sf -X PATCH $BASE/api/workbuddy/settings -H "$WBAUTH" -H 'Content-Type: application/json' \
   -d '{"enabled":true}' >/dev/null
@@ -335,6 +339,9 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST $BASE/v1/chat/completions 
   -H "Authorization: Bearer $WB_AK" -H 'Content-Type: application/json' \
   -d '{"model":"wb-x","messages":[{"role":"user","content":"re-enabled"}]}')
 assert_case "重新启用后聊天恢复 200" [ "$CODE" = "200" ]
+# 恢复后停用原因应由 observeSuccess 自动清空，否则面板会一直显示旧的停用原因。
+assert_case "恢复后 parked_reason 已清空" \
+  [ -z "$(wb_psql "SELECT parked_reason FROM workbuddy_channel_state WHERE provider_id=$WBP_INTL_ID")" ]
 
 # ---- 13.5 平台任务总闸（workbuddy_jobs_enabled）----
 echo "== 15. WorkBuddy 任务总闸（平台开关 OFF → ON）=="

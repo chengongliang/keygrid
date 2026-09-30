@@ -284,6 +284,11 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 						parkedUntil = parked.Until
 					}
 					reason = parked.Reason
+					// 把停用原因落库，供渠道面板展示与运维排查。
+					// 只落 ParkedError 的枚举原因（disabled/daily_limit/...），
+					// 不落 perr.Error() —— 后者可能是读库失败的原始错误文本。
+					// 成功请求会在 Runtime.observeSuccess 里清空该字段（自动恢复）。
+					h.persistParked(userID, cand.provider.ID, parked.Reason)
 				}
 				lastStatus = http.StatusTooManyRequests
 				lastErrMsg = "channel " + cand.provider.Name + " parked: " + reason

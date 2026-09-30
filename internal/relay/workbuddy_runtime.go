@@ -176,3 +176,17 @@ func jsonInt(v any) (int, bool) {
 	}
 	return 0, false
 }
+
+// persistParked 把渠道停用原因写入运行态（只写枚举原因，不含上游/错误文本）。
+//
+// 为什么在转发侧写：Admit 刻意保持只读（它同时被后台任务复用，任务失败不该
+// 改动运行态）；而「这个渠道此刻为什么不可用」是用户能在面板上看到的信息，
+// 必须在真实转发的准入失败点落库。行不存在时 op 层会自动建行。
+func (h *Handler) persistParked(userID, providerID int64, reason string) {
+	if h == nil || h.Op == nil || reason == "" {
+		return
+	}
+	if err := h.Op.SetWorkbuddyParked(userID, providerID, reason, h.now()); err != nil {
+		log.Printf("[workbuddy] persist parked reason failed provider=%d: %v", providerID, err)
+	}
+}

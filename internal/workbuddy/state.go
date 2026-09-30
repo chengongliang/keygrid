@@ -377,6 +377,11 @@ func (r *Runtime) observeSuccess(cs counterStore, p *model.Provider, ev Event, n
 		if state == nil {
 			state = &model.WorkbuddyChannelState{UserID: p.UserID, ProviderID: p.ID}
 		}
+		// 成功请求说明停用条件已解除（用户重新开启 / 额度重置 / 补足积分），
+		// 顺手清空停用原因 —— 转发侧的 admit 是只读的，这里是唯一的恢复点。
+		if state.ParkedReason != "" {
+			state.ParkedReason = ""
+		}
 		deleteCooldown(state, ev.UpModel, now)
 		state.LastOKAt = &now
 		state.UpdatedAt = now

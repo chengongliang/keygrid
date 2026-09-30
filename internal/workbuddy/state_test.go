@@ -1050,3 +1050,34 @@ func TestProbeCreditsRequiresContext(t *testing.T) {
 		t.Fatal("nil token 应返回错误")
 	}
 }
+
+// TestObserveSuccessClearsParkedReason 成功请求是停用状态的唯一恢复点：
+// 转发侧 Admit 只读，因此「重新开启 / 额度重置 / 补足积分」后必须由
+// observeSuccess 把 parked_reason 清空，否则面板会一直显示旧的停用原因。
+func TestObserveSuccessClearsParkedReason(t *testing.T) {
+	p := stateTestProvider()
+	db := &fakeDB{state: &model.WorkbuddyChannelState{
+		UserID: p.UserID, ProviderID: p.ID,
+		ParkedReason: reasonDisabled,
+	}}
+	rt := newTestRuntime(db, nil, stateTestNow)
+	rt.Observe(Event{Provider: p, UpModel: "m", Success: true})
+
+	if db.state.ParkedReason != "" {
+		t.Fatalf("成功请求应清空 parked_reason, got %q", db.state.ParkedReason)
+	}
+	if db.state.LastOKAt == nil {
+		t.Fatal("成功应同时写 last_ok_at")
+	}
+}
+
+// TestObserveSuccessKeepsParkedReasonWhenAlreadyEmpty 反向：本来就为空时不做多余写入语义。
+func TestObserveSuccessKeepsParkedReasonWhenAlreadyEmpty(t *testing.T) {
+	p := stateTestProvider()
+	db := &fakeDB{state: &model.WorkbuddyChannelState{UserID: p.UserID, ProviderID: p.ID}}
+	rt := newTestRuntime(db, nil, stateTestNow)
+	rt.Observe(Event{Provider: p, UpModel: "m", Success: true})
+	if db.state.ParkedReason != "" {
+		t.Fatalf("不应写入原因: %q", db.state.ParkedReason)
+	}
+}
