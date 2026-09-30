@@ -63,7 +63,7 @@
 | G1 | **端点拼接硬编码**：`upstreamTarget(baseURL)` 恒拼 `/v1/chat/completions`（`relay/route.go:84-86`），而 `codebuddy-cn` 预设 base_url 是 `https://copilot.tencent.com/v2`（`oauth/presets.go:149-155`）→ 实际请求 `/v2/v1/chat/completions`；上游真实路径是 `/v2/chat/completions`（`wb_proxy.py:141`）。**现存渠道很可能转发不通**。 | 两侧对照，待 P0 实测 |
 | G2 | OpenAI 转发只带 `Authorization` / `Content-Type` / UA（`relay/handler.go:660-661`），缺 `X-IDE-*` / `X-Product` / `X-Domain` / `X-User-Id` / `X-CodeBuddy-Request` → 上游 WAF `11128 illegal API invocation from an unapproved channel`（`wb_proxy.py:2391-2394`）。 | 两侧对照 |
 | G3 | 上游要求 `stream:true`（`wb_proxy.py:3040`），KeyGrid 默认跟随客户端 `stream` → 非流客户端失败。 | wb2a |
-| G4 | 无 `developer` role 归一化、无 `tool_choice` 对象降级 → 11128 / 11101。 | wb2a |
+| G4 | 无 `tool_choice` 对象降级 → 上游报 11101；`max_completion_tokens` 上游不认（wb2a 反向转换为 `max_tokens`）。**注**：`developer`→`system` 内核已有（`relay/handler.go:567-609 buildUpstreamBody` + `normalizeDeveloperRoles`），不需要再做。 | wb2a `wb_proxy.py:2664,2756`；KeyGrid 已覆盖 developer |
 | G5 | 无 provider 级每日 token 限额 / 保留积分 / 模型级冷却（`quota` 包只做 Codex 快照）。 | `quota/codex.go:48` |
 | G6 | 无 provider 级出口代理（只有全局 `platform_settings.proxy_url` + `UseProxy bool`，`relay/state.go:294 clientFor`）。 | `model/provider.go:39` |
 | G7 | 无通用后台任务框架：`task.Runner.runOnce` 硬编码 4 件事（`internal/task/task.go:56-77`）。 | 直接阅读 |
@@ -308,7 +308,7 @@ authed.Get("/workbuddy/jobs/runs", wbH.Runs)              // 最近执行日志
 | 层 | 位置 | 内容 |
 |---|---|---|
 | 编译期常量 | `internal/workbuddy/realm.go` | 端点、路径、身分版本号、UA、内嵌快照 |
-| 环境变量 | `.env` / `.env.example` | `WORKBUDDY_ENABLED=0`（默认关）、`WORKBUDDY_UPSTREAM_BASE`（E2E 打桩）、`WORKBUDDY_SCRUB=off`、`WORKBUDDY_JOBS=0` |
+| 环境变量 | `.env` / `.env.example` | `WORKBUDDY_ENABLED=1`（**默认开**：对 codebuddy-cn 渠道旧行为是错的，适配才是修复；置 0 作紧急回滚）、`WORKBUDDY_FORCE_STREAM=1`（A3 的开关）、`WORKBUDDY_JOBS=0`、`WORKBUDDY_FINGERPRINT=0` |
 | 平台设置 | `platform_settings` | 是否允许该能力、任务 kill switch、是否允许用户开自动化 |
 | 用户设置 | `workbuddy_settings` | 保留积分、日限额、身分档位、脱敏档位、逐任务开关 |
 
@@ -359,15 +359,20 @@ authed.Get("/workbuddy/jobs/runs", wbH.Runs)              // 最近执行日志
 | 序 | 步骤 | 依据 | 触发 |
 |---|---|---|---|
 | 1 | 模型名映射 | KeyGrid `model_map`（内核做） | 恒 |
-| 2 | `developer` → `system` | `wb_proxy.py:2349` | 恒（否则 11128） |
-| 3 | `tool_choice` 对象 → 字符串；**保留 `tools` 声明** | `wb_proxy.py:2664` | 恒（否则 11101 / 模型退化输出 DSML 文本） |
-| 4 | 顶层 `name` 工具包成 function schema | `wb_proxy.py:2705` | 有该形态时 |
-| 5 | `max_tokens` → `max_completion_tokens` | `wb_proxy.py:2756` | 恒 |
-| 6 | `stream:true` + `stream_options.include_usage:true` | `wb_proxy.py:3040` | `Plan.ForceStream` |
-| 7 | DeepSeek thinking 注入（含缺档补默认档） | `wb_proxy.py:2964-3040` | 仅 deepseek 系；客户端显式 `disabled`/`effort=none` 不覆盖 |
+| 2 | `developer` → `system` | `wb_proxy.py:2349` | **内核已做**（`handler.go:567-609`）；本包再幂等补一次，防调用方绕过 |
+| 3 | `tool_choice` 对象 → 字符串；**保留 `tools` 声明** | `wb_proxy.py:2664-2704` | 恒（否则 11101 / 模型退化输出 DSML 文本） |
+| 4 | 顶层 `name` 工具包成 function schema | `wb_proxy.py:2712-2727` | 有该形态时 |
+| 5 | **`max_completion_tokens` → `max_tokens`**（方向别搞反：上游只认 `max_tokens`；`max_tokens` 已存在时丢弃别名） | `wb_proxy.py:2756-2765` | 恒 |
+| 6 | `stream:true` + `stream_options.include_usage:true` | `wb_proxy.py:3025-3027` | `Plan.ForceStream` |
+| 7 | DeepSeek thinking 注入（含缺档补默认档） | `wb_proxy.py:3012-3023` | 仅 deepseek 系；客户端显式 `disabled`/`effort=none` 不覆盖 |
 | 8 | 工具调用配对自愈（结果块移回批次、孤儿 id 对称裁剪） | wb2a v1.4.9 | 历史存在不配对 `tool_calls` 时 |
-| 9 | `reasoning_content` 回填 + `reasoning` 镜像非空 | `wb_proxy.py:2622` | 与 7 绑定 |
+| 9 | `reasoning_content` 回填 + `reasoning` 镜像非空 | `wb_proxy.py:2622-2660` | 与 7 绑定 |
 | 10 | WAF 脱敏（默认关） | `wb_proxy.py:2366-2468` | `ScrubMode != off` |
+
+**明确不做**（wb2a 的做法，但会改用户内容，因此拒绝移植）：
+
+- **注入系统提示**：wb2a 在 `messages[0].role != "system"` 时插入 `SYSTEM_PROMPT`（`wb_proxy.py:2996-2998`）。这会改变用户实际发出的话题，且用户不可见；KeyGrid 不注入任何系统提示。
+- **删除 `tools` 以示 `tool_choice:"none"`**：wb2a 的注释（`wb_proxy.py:2672-2697`）说明这会让模型拿不到函数签名、把调用降级成 DSML 伪 JSON 文本，Agent 原地空转。这里保留 `tools`、只把 `tool_choice` 降级为字符串。
 
 响应侧：
 
@@ -545,11 +550,13 @@ if err := workbuddy.Admit(cand.provider, cand.upModel, wbDeps); err != nil {
 
 ### P1：渠道接入（能用自己的账号跑通三入口）
 
-- [ ] `internal/oauth/providers/workbuddy.go`（intl，state 轮询；`TokenSet.Extra` 写 `uid`/`nickname`/`realm`）
-- [ ] `internal/workbuddy`：`realm.go` / `identity.go` / `pipeline.go` / `adapt.go` / `stream.go` / `catalog.go`
-- [ ] relay 接线点 1–5；`upstreamCall` 签名改动（4 个调用点）
-- [ ] 预设：新增 `workbuddy-intl`，修正 `codebuddy-cn`（base_url 只留 host）；存量渠道 base_url 幂等归一化
-- [ ] 内嵌模型快照 + `FetchModels` + 接线点 9
+- [x] `internal/oauth/providers/workbuddy.go`（intl，state 轮询；`TokenSet.Extra` 写 `uid`/`nickname`/`realm`）
+- [x] `internal/workbuddy`：`realm.go` / `identity.go` / `pipeline.go` / `adapt.go` / `stream.go`
+- [x] relay 接线点 1–5；`upstreamCall` 增加 `extra http.Header` + `forceStream bool`（4 个调用点已同步）
+- [x] 预设：新增 `workbuddy-intl`，修正 `codebuddy-cn`（base_url 只留 host）；存量渠道 base_url 幂等归一化
+- [x] `.env.example` 增补 `WORKBUDDY_*` 四项
+- [ ] 内嵌模型快照 + `FetchModels` + 接线点 9（`catalog.go`）
+- [ ] relay 侧 httptest 契约测试（断言请求路径 / 身分头 / `stream:true` / 非流聚合）
 - **验收**：chat 流式/非流、`/v1/messages`、`/v1/responses`、工具调用、429 failover 到第二条渠道 —— 五条路径在 `E2E_MODE` 打桩下全绿；真实账号手测一次成功；`request_errors` 无正文
 
 ### P2：运行态（限额/积分/冷却）

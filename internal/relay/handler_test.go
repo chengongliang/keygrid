@@ -383,7 +383,7 @@ func TestUpstreamErrorClassificationE2E(t *testing.T) {
 		}))
 		w := httptest.NewRecorder()
 		body := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
-		status, _, err := h.upstreamCall(t.Context(), h.HTTPClient, up.URL, "sk-x", body, false, protoOpenAI, w, "")
+		status, _, err := h.upstreamCall(t.Context(), h.HTTPClient, up.URL, "sk-x", body, false, protoOpenAI, w, "", nil, false)
 		up.Close()
 		if err == nil {
 			t.Fatalf("upstream %d must produce an error", tc.status)

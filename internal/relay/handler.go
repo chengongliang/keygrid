@@ -18,6 +18,7 @@ import (
 	"github.com/chengongliang/keygrid/internal/quota"
 	"github.com/chengongliang/keygrid/internal/server/middleware"
 	"github.com/chengongliang/keygrid/internal/server/resp"
+	"github.com/chengongliang/keygrid/internal/workbuddy"
 )
 
 // Handler 转发引擎：OpenAI 兼容、SSE 流式、failover、熔断、限流、异步记账。
@@ -284,6 +285,10 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 		proto := channelProto(cand.provider)
 		var upstreamBody []byte
 		var target string
+		// WorkBuddy / CodeBuddy 专用：额外身分头与调用形态（见 internal/workbuddy）。
+		// 非该供应商时保持 nil / 零值，内核行为与今天完全一致。
+		var wbExtra http.Header
+		var wbPlan workbuddy.Plan
 		switch proto {
 		case protoResponses:
 			// Codex 与 xAI 都使用 Responses 上游，但请求归一化、会话头和
@@ -343,6 +348,29 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 		default:
 			upstreamBody = buildUpstreamBody(req.Pivot, req.Model, cand.upModel)
 			target = upstreamTarget(cand.provider.BaseURL)
+			// WorkBuddy / CodeBuddy：上游路径是 /v2/chat/completions（内核默认拼的
+			// /v1/chat/completions 对该上游是错的），且必须带 IDE 身分头，否则
+			// WAF 直接返回 11128 (illegal API invocation from an unapproved channel)。
+			if workbuddy.Enabled() && workbuddy.IsWorkBuddy(cand.provider) {
+				var werr error
+				upstreamBody, target, wbPlan, werr = workbuddy.AdaptRequest(
+					cand.provider, upstreamBody, cand.upModel, req.Stream)
+				if werr != nil {
+					breakerFail(cand.provider)
+					lastErrMsg = "workbuddy transform failed for " + cand.provider.Name + ": " + werr.Error()
+					h.noteFailure(userID, apiKeyID, cand.provider.ID, req.Model, errKindTransform, 0, lastErrMsg, start)
+					continue
+				}
+				hdrs, herr := workbuddy.Headers(cand.provider,
+					&oauth.TokenSet{AccessToken: apiKey, Extra: tokenExtra}, workbuddy.HeaderOptFor())
+				if herr != nil {
+					breakerFail(cand.provider)
+					lastErrMsg = "workbuddy identity headers failed for " + cand.provider.Name + ": " + herr.Error()
+					h.noteFailure(userID, apiKeyID, cand.provider.ID, req.Model, errKindTransform, 0, lastErrMsg, start)
+					continue
+				}
+				wbExtra = hdrs
+			}
 		}
 
 		// 渠道级出口代理：勾选代理但平台未配置 → failover 该渠道（不静默直连）
@@ -356,6 +384,14 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 
 		// 上游 UA：默认透传客户端（Codex 渠道保持固定值），渠道可自定义/强制透传
 		ua := ResolveUserAgent(cand.provider, proto, clientUA)
+		// WorkBuddy 身分档位的 UA 必须优先于"透传客户端 UA"：上游按 UA 与身分头
+		// 交叉校验客户端身份，透传 SDK/CLI 的 UA 会被判为未授权渠道。
+		// 渠道显式配置 ua_mode=custom/forward 时以渠道配置为准（那是用户的明确意思）。
+		if wbExtra != nil && cand.provider.UAMode == "" {
+			if v := wbExtra.Get("User-Agent"); v != "" {
+				ua = v
+			}
+		}
 
 		var status int
 		var usage UsageRecord
@@ -379,7 +415,7 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 				apiKey, upstreamBody, req.Stream, entry, responseWriter, ua)
 		default:
 			status, usage, callErr = h.upstreamCall(r.Context(), client, target, apiKey,
-				upstreamBody, req.Stream, entry, responseWriter, ua)
+				upstreamBody, req.Stream, entry, responseWriter, ua, wbExtra, wbPlan.ForceStream)
 		}
 
 		// 记账（含失败请求：tokens=0，status/latency 保留）
@@ -640,6 +676,8 @@ func maintSuffix(text string) string {
 // entry=chat：非流式字节透传、流式 SSE 透传（原始行为）；
 // entry=messages/responses：响应需回转成入口格式（经 relayAgg / 流式桥）。
 // client 由调用方按渠道代理开关选定（clientFor）。
+// extra 为渠道特化的额外请求头（WorkBuddy 身分头；一般为 nil）；
+// forceStream 表示上游只能流式（客户端要非流式时由本函数折叠成单条 JSON）。
 // 返回 (HTTP 状态码, usage 记录, 错误)。
 func (h *Handler) upstreamCall(
 	ctx context.Context,
@@ -651,17 +689,31 @@ func (h *Handler) upstreamCall(
 	entry string,
 	w http.ResponseWriter,
 	ua string,
+	extra http.Header,
+	forceStream bool,
 ) (int, UsageRecord, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, strings.NewReader(string(body)))
 	if err != nil {
 		return 0, UsageRecord{}, err
+	}
+	// 身分头先落地：Content-Type / Authorization / User-Agent / Accept 由下面按
+	// 本次调用形态覆盖（额外头里可能同名，不能反客为主）。
+	for k, vs := range extra {
+		if k == "User-Agent" {
+			continue // UA 统一由 ua 参数决定（渠道 ua_mode 语义）
+		}
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	if ua != "" {
 		req.Header.Set("User-Agent", ua)
 	}
-	if isStream {
+	// 上游只能流式时，即使客户端要非流式也必须按 SSE 收（读完自行折叠）。
+	upstreamStream := isStream || forceStream
+	if upstreamStream {
 		req.Header.Set("Accept", "text/event-stream")
 	} else {
 		req.Header.Set("Accept", "application/json")
@@ -678,7 +730,7 @@ func (h *Handler) upstreamCall(
 		return upResp.StatusCode, UsageRecord{}, &UpstreamError{Status: upResp.StatusCode, Body: string(b), ContentType: upResp.Header.Get("Content-Type")}
 	}
 
-	if isStream {
+	if upstreamStream && isStream {
 		// 流式：chat 入口透传；messages/responses 入口走桥转换
 		if entry == protoOpenAI {
 			return streamPassthrough(w, upResp)
@@ -689,6 +741,15 @@ func (h *Handler) upstreamCall(
 	respBytes, err := io.ReadAll(upResp.Body)
 	if err != nil {
 		return 0, UsageRecord{}, err
+	}
+
+	// 上游强制流式 / 客户端要非流式：把 SSE 折成单条 chat/completions JSON，
+	// 交给下面既有的非流路径（协议转换与字节透传都不需要改）。
+	collapsed := false
+	if forceStream && !isStream {
+		if merged, ok := workbuddy.CollapseSSE(respBytes); ok {
+			respBytes, collapsed = merged, true
+		}
 	}
 
 	if entry != protoOpenAI {
@@ -709,7 +770,8 @@ func (h *Handler) upstreamCall(
 
 	u := extractUsageFromJSON(respBytes)
 	ct := upResp.Header.Get("Content-Type")
-	if ct == "" {
+	if ct == "" || collapsed {
+		// 折叠后身体是 JSON，不能沿用上游的 text/event-stream
 		ct = "application/json; charset=utf-8"
 	}
 	w.Header().Set("Content-Type", ct)

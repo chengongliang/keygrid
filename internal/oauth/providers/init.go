@@ -13,4 +13,5 @@ func init() {
 	oauth.Register(Qoder{})
 	oauth.Register(Trae{})
 	oauth.Register(CodeBuddyCN{})
+	oauth.Register(WorkBuddyIntl{})
 }

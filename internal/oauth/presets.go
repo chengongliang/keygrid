@@ -146,12 +146,24 @@ var providerPresets = []ProviderPreset{
 		Description: "Trae（字节跳动 marscode）",
 	},
 	{
+		// 国内版：base_url 只留 host —— 上游 chat 路径是 /v2/chat/completions，
+		// 由 internal/workbuddy 的 Endpoint 拼接。历史值 https://copilot.tencent.com/v2
+		// 也仍可用（Endpoint 会幂等剥掉尾部路径）。
 		Key: "codebuddy-cn", Kind: "oauth", Protocol: "openai",
-		BaseURL:     "https://copilot.tencent.com/v2",
+		BaseURL:     "https://copilot.tencent.com",
 		SignupURL:   "https://copilot.tencent.com",
 		Models:      []string{"glm-5.2", "glm-5.1", "glm-5.0", "minimax-m3", "kimi-k2.7", "kimi-k2.6", "hy3-preview", "deepseek-v4-pro", "deepseek-v4-flash"},
 		AuthMode:    "oauth+apikey 双模式（腾讯 CodeBuddy）",
 		Description: "CodeBuddy CN（腾讯云 AI 编程助手，OpenAI 兼容统一网关）",
+	},
+	{
+		Key: "workbuddy-intl", Kind: "oauth", Protocol: "openai",
+		BaseURL:     "https://www.workbuddy.ai",
+		SignupURL:   "https://www.workbuddy.ai",
+		Models:      []string{"deepseek-v4.1-flash", "gpt-6-astra", "hy4-preview-f", "hy4-preview", "hy3", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "grok-4.7", "gpt-5.3-codex", "gemini-3.5-flash", "glm-5.3", "glm-5.3-flash", "glm-5.2", "kimi-k3", "kimi-k2.8-preview", "kimi-k2.6"},
+		AuthMode:    "state 轮询式浏览器授权（国际版 WorkBuddy）",
+		NeedsProxy:  true, // www.workbuddy.ai 国内直连不稳定，默认启用平台代理（用户可取消勾选）
+		Description: "WorkBuddy 国际版（腾讯海外版 AI 编程助手，OpenAI 兼容统一网关）",
 	},
 }
 
