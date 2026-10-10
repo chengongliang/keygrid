@@ -39,6 +39,9 @@ export default function AdminPrices() {
   const [syncChecked, setSyncChecked] = useState<Set<string>>(new Set())
   const [syncKw, setSyncKw] = useState('')
   const [syncSaving, setSyncSaving] = useState(false)
+  // 一键 0 价：确认弹窗 + 提交中
+  const [zeroConfirm, setZeroConfirm] = useState(false)
+  const [zeroSaving, setZeroSaving] = useState(false)
 
   const reload = () => {
     setLoading(true)
@@ -117,6 +120,20 @@ export default function AdminPrices() {
     setEditing({ model, prompt: '', completion: '', remark: '' })
   }
 
+  // 一键把当前所有未定价模型配置为 0 价（免费，但移出未定价提醒）
+  const commitZero = () => {
+    setZeroSaving(true)
+    setErr('')
+    api.post<{ saved: number }>('/api/admin/prices/zero', { models: unpriced })
+      .then((d) => {
+        setZeroConfirm(false)
+        setNotice(t('adminPrices.zeroDoneMsg', { n: d?.saved ?? unpriced.length }))
+        reload()
+      })
+      .catch((e) => setErr(e.message))
+      .finally(() => setZeroSaving(false))
+  }
+
   // ---- 一键同步（OpenRouter：preview 对比 → 勾选 → commit 写入）----
   const openSync = () => {
     setNotice('')
@@ -184,9 +201,15 @@ export default function AdminPrices() {
       {/* 未定价提醒 */}
       {unpriced.length > 0 && (
         <div className="warn-well mb-4 rounded-lg px-4 py-3 text-sm">
-          <div className="mb-2 flex items-center gap-2 font-medium">
-            <TriangleAlert className="h-4 w-4 text-amber-500" />
-            {t('adminPrices.unpricedBanner', { n: unpriced.length })}
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 font-medium">
+              <TriangleAlert className="h-4 w-4 text-amber-500" />
+              {t('adminPrices.unpricedBanner', { n: unpriced.length })}
+            </div>
+            <button className="btn-ghost h-7 shrink-0 px-2"
+              onClick={() => { setNotice(''); setErr(''); setZeroConfirm(true) }}>
+              <DollarSign className="h-3.5 w-3.5" /> {t('adminPrices.zeroAllButton')}
+            </button>
           </div>
           <div className="flex flex-wrap gap-1.5">
             {unpriced.map((m) => (
@@ -288,6 +311,19 @@ export default function AdminPrices() {
               <button className="btn-ghost" onClick={() => setEditing(null)}>{t('common.cancel')}</button>
               <button className="btn-primary" disabled={saving} onClick={save}>{saving ? t('adminPrices.saving') : t('common.save')}</button>
             </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* 一键 0 价确认 */}
+      {zeroConfirm && (
+        <Modal title={t('adminPrices.zeroConfirmTitle')} onClose={() => !zeroSaving && setZeroConfirm(false)}>
+          <p className="text-sm">{t('adminPrices.zeroConfirmBody', { n: unpriced.length })}</p>
+          <div className="mt-4 flex justify-end gap-2">
+            <button className="btn-ghost" disabled={zeroSaving} onClick={() => setZeroConfirm(false)}>{t('common.cancel')}</button>
+            <button className="btn-primary" disabled={zeroSaving} onClick={commitZero}>
+              {zeroSaving ? t('adminPrices.saving') : t('adminPrices.zeroConfirmOk')}
+            </button>
           </div>
         </Modal>
       )}
