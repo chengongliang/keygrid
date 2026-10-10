@@ -216,6 +216,8 @@ func NewWithOptions(o *op.Op, cfg *conf.Config, webFS fs.FS) http.Handler {
 			admin.Post("/prices", adminPricesH.Upsert)
 			admin.Delete("/prices/{id}", adminPricesH.Delete)
 			admin.Get("/prices/unpriced", adminPricesH.Unpriced)
+			// 一键 0 价：把未定价模型批量配置为 $0，消除未定价提醒
+			admin.Post("/prices/zero", adminPricesH.ZeroPrices)
 			// 定价一键同步（OpenRouter）：preview 只读对比，commit 批量写入勾选项
 			admin.Get("/prices/sync/preview", adminPricesH.SyncPreview)
 			admin.Post("/prices/sync", adminPricesH.SyncCommit)

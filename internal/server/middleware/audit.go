@@ -36,6 +36,7 @@ const (
 	AuditEventAdminPriceUpsert = "admin.price_upsert"
 	AuditEventAdminPriceDelete = "admin.price_delete"
 	AuditEventAdminPriceSync   = "admin.price_sync"
+	AuditEventAdminPriceZero   = "admin.price_zero"
 
 	// 渠道健康：熔断手动重置留痕
 	AuditEventAdminBreakerReset = "admin.provider_breaker_reset"

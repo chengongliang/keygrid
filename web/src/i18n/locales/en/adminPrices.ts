@@ -11,6 +11,11 @@ const adminPrices = {
   unpricedBanner: 'Models used by providers but unpriced ({{n}}) — unpriced models are free of charge; consider adding prices',
   addPriceTip: 'Click to add price',
   unpricedSource: 'From each provider\'s model_map config (providers without a map cannot be enumerated; not an exhaustive list)',
+  zeroAllButton: 'Set all to $0',
+  zeroConfirmTitle: 'One-click set to $0',
+  zeroConfirmBody: 'Set both input and output unit prices to 0 (USD / 1M tokens) for the current {{n}} unpriced models. They stay free but are removed from the unpriced reminder. Continue?',
+  zeroConfirmOk: 'Set to $0',
+  zeroDoneMsg: 'Set {{n}} models to $0',
   // ---- Form validation / notices ----
   errModelRequired: 'Model name is required',
   errNonNegative: 'Unit prices must be non-negative numbers',

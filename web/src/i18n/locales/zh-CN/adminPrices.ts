@@ -11,6 +11,11 @@ const adminPrices = {
   unpricedBanner: '渠道已用但未定价的模型（{{n}}）—— 未定价模型不计费，建议补价',
   addPriceTip: '点击补价',
   unpricedSource: '来自各渠道 model_map 配置（无 map 的渠道无法枚举，非完整列表）',
+  zeroAllButton: '全部设为 0 价',
+  zeroConfirmTitle: '一键配置为 0 价',
+  zeroConfirmBody: '将当前 {{n}} 个未定价模型的输入/输出单价全部设为 0（USD / 1M tokens）。配置后仍免费放行，仅从「未定价提醒」中移除。确定继续？',
+  zeroConfirmOk: '确认设为 0 价',
+  zeroDoneMsg: '已将 {{n}} 个模型配置为 0 价',
   // ---- 表单校验 / 提示 ----
   errModelRequired: '模型名必填',
   errNonNegative: '单价必须是非负数字',

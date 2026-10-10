@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/chengongliang/keygrid/internal/model"
 	"github.com/chengongliang/keygrid/internal/op"
@@ -98,6 +100,57 @@ func (h *AdminPricesHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	middleware.Audit(h.Op, middleware.UserID(r.Context()), middleware.AuditEventAdminPriceDelete,
 		"model="+target.Model, middleware.ClientIP(r), r.UserAgent())
 	resp.Success(w, map[string]any{"deleted": true})
+}
+
+// zeroPricesReq 一键 0 价请求体。
+// 只接受批量模型名；价格恒为 0（输入/输出同价），不开放自定义。
+type zeroPricesReq struct {
+	Models []string `json:"models"`
+}
+
+// buildZeroPriceRows 去重/清洗模型名，产出 0 价条目（纯函数，便于单测）。
+func buildZeroPriceRows(models []string, remark string) []model.ModelPrice {
+	ps := make([]model.ModelPrice, 0, len(models))
+	seen := map[string]bool{}
+	for _, m := range models {
+		m = strings.TrimSpace(m)
+		if m == "" || seen[m] {
+			continue
+		}
+		seen[m] = true
+		ps = append(ps, model.ModelPrice{Model: m, PromptPrice: 0, CompletionPrice: 0, Remark: remark})
+	}
+	return ps
+}
+
+// POST /api/admin/prices/zero —— 一键把未定价模型配置为 $0（输入/输出均为 0）。
+// 语义：从「未定价（免费且不计数）」变为「已定价 0（免费，但进入价格表）」，用于消除未定价提醒。
+func (h *AdminPricesHandler) ZeroPrices(w http.ResponseWriter, r *http.Request) {
+	var req zeroPricesReq
+	if err := resp.Decode(r, &req); err != nil {
+		resp.BadRequest(w, "invalid json body")
+		return
+	}
+	if len(req.Models) == 0 {
+		resp.BadRequest(w, "models required")
+		return
+	}
+	if len(req.Models) > syncMaxItems {
+		resp.BadRequest(w, fmt.Sprintf("单次条数超限（≤%d）", syncMaxItems))
+		return
+	}
+	ps := buildZeroPriceRows(req.Models, "一键 0 价 "+time.Now().Format(syncRemarkDateLayout))
+	if len(ps) == 0 {
+		resp.BadRequest(w, "无有效条目")
+		return
+	}
+	if err := h.Op.UpsertModelPricesBatch(ps); err != nil {
+		resp.Internal(w, "save prices failed")
+		return
+	}
+	middleware.Audit(h.Op, middleware.UserID(r.Context()), middleware.AuditEventAdminPriceZero,
+		fmt.Sprintf("count=%d price=0", len(ps)), middleware.ClientIP(r), r.UserAgent())
+	resp.Success(w, map[string]any{"saved": len(ps)})
 }
 
 // GET /api/admin/prices/unpriced —— 渠道已用但未定价的模型（提醒列表）。
