@@ -22,6 +22,7 @@ export default {
   productVscode: 'VS Code 插件',
   productCli: 'CLI',
   scrubMode: '脱敏档位（默认开启）',
+  scrubOffWarn: '关闭脱敏后：Claude Code、Codex CLI 等客户端的特征文本会被上游判为未授权渠道（HTTP 400 / code 11128），这些客户端将无法使用本渠道。',
   scrubDefaultHint: '未设置时默认开启。Claude Code / Codex CLI 这类客户端的特征文本会被上游判为未授权渠道（11128）；脱敏只改写命中的指纹片段，不改写其它内容。关闭即放弃这层保护。',
   scrubOff: '关闭',
   scrubShadow: '仅统计',

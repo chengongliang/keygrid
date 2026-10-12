@@ -375,6 +375,9 @@ export default function WorkBuddy() {
             </div>
           </div>
           <p className="mt-1 text-xs text-muted">{t('workbuddy.scrubDefaultHint')}</p>
+          {draft.scrub_mode === 'off' && (
+            <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">{t('workbuddy.scrubOffWarn')}</p>
+          )}
           {draft.scrub_mode === 'on' && (
             <div className="warn-well mt-3 flex items-start gap-2 rounded-lg px-3 py-2 text-xs" style={{ color: 'var(--text)' }}>
               <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />

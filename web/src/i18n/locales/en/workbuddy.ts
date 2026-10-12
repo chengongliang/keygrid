@@ -23,6 +23,7 @@ export default {
   productCli: 'CLI',
   scrubMode: 'Scrub mode (on by default)',
 
+  scrubOffWarn: 'With scrubbing off, fingerprint text from clients such as Claude Code or the Codex CLI makes the upstream reject the request as an unapproved channel (HTTP 400 / code 11128) — those clients will not work on this channel.',
   scrubDefaultHint: 'On unless turned off. Fingerprint text from clients such as Claude Code or the Codex CLI makes the upstream reject the request as an unapproved channel (11128); scrubbing rewrites only the matched fragments. Turning it off gives up that protection.',
   scrubOff: 'Off',
   scrubShadow: 'Count only',
