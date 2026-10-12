@@ -50,6 +50,11 @@ export default function AdminUsers() {
     } catch (e: any) { fail(e) } finally { setBusyId(0) }
   }
 
+  // 重置密码弹窗：有弹窗打开时错误只在弹窗内展示（页面级横条在遮罩下面，等于看不见）
+  const modalOpen = !!resetTarget
+  const openModal = (open: () => void) => { setErr(''); open() }
+  const closeModal = (close: () => void) => { setErr(''); close() }
+
   const doReset = async (u: AdminUserRow) => {
     setBusyId(u.id); setErr('')
     try {
@@ -75,7 +80,7 @@ export default function AdminUsers() {
           <button className="btn-ghost shrink-0">{t('common.search')}</button>
         </form>
       </div>
-      {err && <div className="mb-3 rounded-lg px-3 py-2 text-sm text-red-600 dark:text-red-400 err-well">{err}</div>}
+      {err && !modalOpen && <div className="mb-3 rounded-lg px-3 py-2 text-sm text-red-600 dark:text-red-400 err-well">{err}</div>}
       {msg && <div className="mb-3 rounded-lg px-3 py-2 text-sm badge-green w-fit">{msg}</div>}
 
       <div className="card overflow-x-auto p-0">
@@ -134,7 +139,7 @@ export default function AdminUsers() {
                       </button>
                     )}
                     <button className="btn-icon" title={t('adminUsers.resetPassword')} disabled={busyId === u.id}
-                      onClick={() => { setResetTarget(u); setResetPass('') }}>
+                      onClick={() => openModal(() => { setResetTarget(u); setResetPass('') })}>
                       <KeyRound className="h-3.5 w-3.5" />
                     </button>
                   </div>
@@ -161,7 +166,7 @@ export default function AdminUsers() {
       {loading && <div className="mt-2 text-center text-xs text-muted opacity-70">{t('common.loading')}</div>}
 
       {resetTarget && (
-        <Modal onClose={() => setResetTarget(null)} title={t('adminUsers.resetPasswordTitle', { email: resetTarget.email })}>
+        <Modal onClose={() => closeModal(() => setResetTarget(null))} title={t('adminUsers.resetPasswordTitle', { email: resetTarget.email })} error={err}>
           {resetPass ? (
             <div className="space-y-3">
               <div className="text-sm text-muted">{t('adminUsers.newPasswordTip')}</div>
@@ -172,14 +177,14 @@ export default function AdminUsers() {
                   {copied ? '✅ ' + t('common.copied') : t('common.copy')}
                 </button>
               </div>
-              <button className="btn-primary w-full" onClick={() => setResetTarget(null)}>{t('adminUsers.done')}</button>
+              <button className="btn-primary w-full" onClick={() => closeModal(() => setResetTarget(null))}>{t('adminUsers.done')}</button>
             </div>
           ) : (
             <div className="space-y-3">
               <div className="text-sm text-muted">{t('adminUsers.resetConfirmTip')}</div>
               <div className="flex gap-2">
                 <button className="btn-danger flex-1" disabled={busyId === resetTarget.id} onClick={() => doReset(resetTarget)}>{t('adminUsers.confirmReset')}</button>
-                <button className="btn-ghost flex-1" onClick={() => setResetTarget(null)}>{t('common.cancel')}</button>
+                <button className="btn-ghost flex-1" onClick={() => closeModal(() => setResetTarget(null))}>{t('common.cancel')}</button>
               </div>
             </div>
           )}

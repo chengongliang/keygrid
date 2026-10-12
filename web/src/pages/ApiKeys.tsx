@@ -259,6 +259,12 @@ export default function ApiKeys() {
     return () => document.removeEventListener('mousedown', close)
   }, [colMenu])
 
+  // 有弹窗打开时错误统一在弹窗内展示（页面级横条在遮罩下面，等于看不见）
+  const modalOpen = creating || !!editing || created !== null
+  // 打开/关闭弹窗顺带清理错误：旧错误不进新弹窗，关掉弹窗也不留幽灵提示
+  const openModal = (open: () => void) => { setErr(''); open() }
+  const closeModal = (close: () => void) => { setErr(''); close() }
+
   const toggleCol = (c: ColKey) => {
     const next = { ...cols, [c]: !cols[c] }
     setCols(next)
@@ -287,6 +293,7 @@ export default function ApiKeys() {
   }
 
   const openEdit = (k: ApiKey) => {
+    setErr('')
     setEditing(k)
     setEName(k.name || '')
     setEEnabled(k.enabled)
@@ -386,7 +393,7 @@ export default function ApiKeys() {
       <div className="mb-4">
         <h2 className="text-lg font-semibold">{t('keys.title')}</h2>
       </div>
-      {err && <div className="mb-3 rounded-lg px-3 py-2 text-sm text-red-600 dark:text-red-400 err-well">{err}</div>}
+      {err && !modalOpen && <div className="mb-3 rounded-lg px-3 py-2 text-sm text-red-600 dark:text-red-400 err-well">{err}</div>}
 
       {/* 接入信息：三协议端点 + 接入方法 */}
       <div className="card mb-4">
@@ -487,7 +494,7 @@ export default function ApiKeys() {
             </div>
           )}
         </div>
-        <button className="btn-primary" onClick={() => setCreating(true)}>{t('keys.newKey')}</button>
+        <button className="btn-primary" onClick={() => openModal(() => setCreating(true))}>{t('keys.newKey')}</button>
       </div>
 
       <div className="card overflow-x-auto p-0">
@@ -591,7 +598,7 @@ export default function ApiKeys() {
 
       {/* 新建 */}
       {creating && (
-        <Modal onClose={() => setCreating(false)} title={t('keys.createTitle')}>
+        <Modal onClose={() => closeModal(() => setCreating(false))} title={t('keys.createTitle')} error={err}>
           <div className="space-y-4">
             <div>
               <label className="label">{t('common.name')}</label>
@@ -619,7 +626,7 @@ export default function ApiKeys() {
               <input className="input font-mono" type="number" min="0" step="any" value={nQuota} onChange={(e) => setNQuota(e.target.value)} placeholder={t('keys.quotaPlaceholder')} />
             </div>
             <div className="flex justify-end gap-2">
-              <button className="btn-ghost" onClick={() => setCreating(false)}>{t('common.cancel')}</button>
+              <button className="btn-ghost" onClick={() => closeModal(() => setCreating(false))}>{t('common.cancel')}</button>
               <button className="btn-primary" disabled={busy} onClick={create}>{t('common.create')}</button>
             </div>
           </div>
@@ -628,7 +635,7 @@ export default function ApiKeys() {
 
       {/* 编辑 */}
       {editing && (
-        <Modal onClose={() => setEditing(null)} title={t('keys.editTitle', { prefix: editing.prefix })}>
+        <Modal onClose={() => closeModal(() => setEditing(null))} title={t('keys.editTitle', { prefix: editing.prefix })} error={err}>
           <div className="space-y-4">
             <div>
               <label className="label">{t('common.name')}</label>
@@ -680,7 +687,7 @@ export default function ApiKeys() {
               </label>
             )}
             <div className="flex justify-end gap-2">
-              <button className="btn-ghost" onClick={() => setEditing(null)}>{t('common.cancel')}</button>
+              <button className="btn-ghost" onClick={() => closeModal(() => setEditing(null))}>{t('common.cancel')}</button>
               <button className="btn-primary" disabled={busy} onClick={saveEdit}>{t('common.save')}</button>
             </div>
           </div>
@@ -689,7 +696,7 @@ export default function ApiKeys() {
 
       {/* 创建成功 */}
       {created && (
-        <Modal onClose={() => setCreated(null)} title={t('keys.createdTitle')}>
+        <Modal onClose={() => closeModal(() => setCreated(null))} title={t('keys.createdTitle')} error={err}>
           <div className="space-y-4">
             <div className="break-all mono-well rounded-lg p-3 font-mono text-sm text-emerald-600 dark:text-emerald-400">
               {created}

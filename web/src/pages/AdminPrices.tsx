@@ -99,6 +99,7 @@ export default function AdminPrices() {
 
   const doDelete = () => {
     if (!deleting) return
+    setErr('')
     api.del(`/api/admin/prices/${deleting.id}`)
       .then(() => {
         setNotice(t('adminPrices.deletedMsg', { model: deleting.model }))
@@ -116,6 +117,7 @@ export default function AdminPrices() {
   }
 
   const openNewFromUnpriced = (model: string) => {
+    setErr('')
     setNotice('')
     setEditing({ model, prompt: '', completion: '', remark: '' })
   }
@@ -133,6 +135,11 @@ export default function AdminPrices() {
       .catch((e) => setErr(e.message))
       .finally(() => setZeroSaving(false))
   }
+
+  // 弹窗错误收敛：有弹窗打开时错误只在弹窗内展示（页面级横条在遮罩下面，等于看不见）
+  const modalOpen = !!editing || !!deleting || syncOpen || zeroConfirm
+  const openModal = (open: () => void) => { setErr(''); open() }
+  const closeModal = (close: () => void) => { setErr(''); close() }
 
   // ---- 一键同步（OpenRouter：preview 对比 → 勾选 → commit 写入）----
   const openSync = () => {
@@ -207,7 +214,7 @@ export default function AdminPrices() {
               {t('adminPrices.unpricedBanner', { n: unpriced.length })}
             </div>
             <button className="btn-ghost h-7 shrink-0 px-2"
-              onClick={() => { setNotice(''); setErr(''); setZeroConfirm(true) }}>
+              onClick={() => { setNotice(''); openModal(() => setZeroConfirm(true)) }}>
               <DollarSign className="h-3.5 w-3.5" /> {t('adminPrices.zeroAllButton')}
             </button>
           </div>
@@ -223,7 +230,7 @@ export default function AdminPrices() {
         </div>
       )}
 
-      {err && <div className="err-well mb-3 rounded-lg px-3 py-2 text-sm text-red-600 dark:text-red-400">{err}</div>}
+      {err && !modalOpen && <div className="err-well mb-3 rounded-lg px-3 py-2 text-sm text-red-600 dark:text-red-400">{err}</div>}
       {notice && !err && <div className="mono-well mb-3 rounded-lg px-3 py-2 text-sm text-emerald-600 dark:text-emerald-400">{notice}</div>}
 
       <div className="mb-3 flex items-center gap-2">
@@ -257,7 +264,7 @@ export default function AdminPrices() {
                 <td className="whitespace-nowrap px-4 py-2.5 text-xs text-muted">{new Date(r.updated_at).toLocaleString()}</td>
                 <td className="whitespace-nowrap px-4 py-2.5 text-right">
                   <button className="btn-ghost mr-1 h-7 px-2" onClick={() => openEdit(r)}><Pencil className="h-3.5 w-3.5" /> {t('common.edit')}</button>
-                  <button className="btn-ghost h-7 px-2 text-red-500" onClick={() => setDeleting(r)}><Trash2 className="h-3.5 w-3.5" /> {t('common.delete')}</button>
+                  <button className="btn-ghost h-7 px-2 text-red-500" onClick={() => openModal(() => setDeleting(r))}><Trash2 className="h-3.5 w-3.5" /> {t('common.delete')}</button>
                 </td>
               </tr>
             ))}
@@ -280,7 +287,7 @@ export default function AdminPrices() {
 
       {/* 新增 / 编辑弹窗 */}
       {editing && (
-        <Modal title={rows.some((r) => r.model === editing.model) || editing.model !== '' ? t('adminPrices.edit') : t('adminPrices.addButton')} onClose={() => setEditing(null)}>
+        <Modal title={rows.some((r) => r.model === editing.model) || editing.model !== '' ? t('adminPrices.edit') : t('adminPrices.addButton')} onClose={() => closeModal(() => setEditing(null))} error={err}>
           <div className="space-y-3">
             <label className="block">
               <span className="mb-1 block text-xs text-muted">{t('adminPrices.labelModelA')} <span className="font-mono">*</span> {t('adminPrices.labelModelB')}</span>
@@ -308,7 +315,7 @@ export default function AdminPrices() {
               {t('adminPrices.formulaExample')}
             </p>
             <div className="flex justify-end gap-2 pt-1">
-              <button className="btn-ghost" onClick={() => setEditing(null)}>{t('common.cancel')}</button>
+              <button className="btn-ghost" onClick={() => closeModal(() => setEditing(null))}>{t('common.cancel')}</button>
               <button className="btn-primary" disabled={saving} onClick={save}>{saving ? t('adminPrices.saving') : t('common.save')}</button>
             </div>
           </div>
@@ -317,10 +324,10 @@ export default function AdminPrices() {
 
       {/* 一键 0 价确认 */}
       {zeroConfirm && (
-        <Modal title={t('adminPrices.zeroConfirmTitle')} onClose={() => !zeroSaving && setZeroConfirm(false)}>
+        <Modal title={t('adminPrices.zeroConfirmTitle')} onClose={() => { if (!zeroSaving) closeModal(() => setZeroConfirm(false)) }} error={err}>
           <p className="text-sm">{t('adminPrices.zeroConfirmBody', { n: unpriced.length })}</p>
           <div className="mt-4 flex justify-end gap-2">
-            <button className="btn-ghost" disabled={zeroSaving} onClick={() => setZeroConfirm(false)}>{t('common.cancel')}</button>
+            <button className="btn-ghost" disabled={zeroSaving} onClick={() => closeModal(() => setZeroConfirm(false))}>{t('common.cancel')}</button>
             <button className="btn-primary" disabled={zeroSaving} onClick={commitZero}>
               {zeroSaving ? t('adminPrices.saving') : t('adminPrices.zeroConfirmOk')}
             </button>
@@ -330,12 +337,12 @@ export default function AdminPrices() {
 
       {/* 删除确认 */}
       {deleting && (
-        <Modal title={t('adminPrices.deleteTitle')} onClose={() => setDeleting(null)}>
+        <Modal title={t('adminPrices.deleteTitle')} onClose={() => closeModal(() => setDeleting(null))} error={err}>
           <p className="text-sm">
             {t('adminPrices.deleteConfirmA')}<span className="font-mono font-medium">{deleting.model}</span>{t('adminPrices.deleteConfirmB')}
           </p>
           <div className="mt-4 flex justify-end gap-2">
-            <button className="btn-ghost" onClick={() => setDeleting(null)}>{t('common.cancel')}</button>
+            <button className="btn-ghost" onClick={() => closeModal(() => setDeleting(null))}>{t('common.cancel')}</button>
             <button className="btn-primary" style={{ background: '#dc2626' }} onClick={doDelete}>{t('common.delete')}</button>
           </div>
         </Modal>
@@ -343,7 +350,7 @@ export default function AdminPrices() {
 
       {/* 一键同步（OpenRouter）弹窗 */}
       {syncOpen && (
-        <Modal title={t('adminPrices.syncModalTitle')} wide onClose={() => !syncSaving && setSyncOpen(false)}>
+        <Modal title={t('adminPrices.syncModalTitle')} wide onClose={() => { if (!syncSaving) closeModal(() => setSyncOpen(false)) }} error={err}>
           <div className="space-y-3">
             <p className="text-xs text-muted">
               {t('adminPrices.syncIntro')}
@@ -407,7 +414,7 @@ export default function AdminPrices() {
                   <span>{t('adminPrices.syncSelected', { n: syncChecked.size })}</span>
                 </div>
                 <div className="flex justify-end gap-2 pt-1">
-                  <button className="btn-ghost" disabled={syncSaving} onClick={() => setSyncOpen(false)}>{t('common.cancel')}</button>
+                  <button className="btn-ghost" disabled={syncSaving} onClick={() => closeModal(() => setSyncOpen(false))}>{t('common.cancel')}</button>
                   <button className="btn-primary" disabled={syncSaving || syncChecked.size === 0} onClick={commitSync}>
                     {syncSaving ? t('adminPrices.importing') : t('adminPrices.importChecked', { n: syncChecked.size })}
                   </button>
