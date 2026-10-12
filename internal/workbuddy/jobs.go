@@ -56,6 +56,14 @@ const (
 
 	// jobMsgAlreadyRan 幂等锁命中时的固定摘要（Tick 用它区分「真实执行」与「跳过」）。
 	jobMsgAlreadyRan = "已在本次窗口执行"
+	// maxJobAttemptsPerDay 当天单个 (任务, 渠道) 的失败重试上限。
+	//
+	// 为什么要有上限：对齐上游「失败不消耗当天机会」的语义（0ba3a29 之后的
+	// 93e9f26 fix(daily_chat)：网页腿失败不再写当日标记，当天积分留待重试），
+	// 但我们的调度是 15 分钟一轮，不加上限会变成每天 96 次重试。
+	maxJobAttemptsPerDay = 3
+	// jobAttemptsMetaKey 记录当天已失败次数的 Meta 键。
+	jobAttemptsMetaKey = "jobAttempts"
 
 	// defaultJobTimeout 单次任务默认超时（P4 的 ACP 会覆盖为 120s）。
 	defaultJobTimeout = 60 * time.Second
@@ -218,6 +226,8 @@ type jobsStore interface {
 	InsertWorkbuddyJobRun(r *model.WorkbuddyJobRun) error
 	GetSetting(key string) (string, error)
 	CreateAuditLog(l *model.AuditLog)
+	// UpdateWorkbuddyMeta 合并写一个 Meta 键（失败重试计数用，见 releaseDecision）。
+	UpdateWorkbuddyMeta(userID, providerID int64, key string, value any, now time.Time) error
 	// ProxyURL 平台出口代理（空串 = 未配置）。任务出口必须与转发一致，
 	// 否则同一账号会出现「聊天走代理、打卡走直连」两种出口 IP。
 	ProxyURL() (string, error)
@@ -634,8 +644,58 @@ func (r *Runtime) runForProvider(ctx context.Context, spec jobSpec, store jobsSt
 
 	res.Status = normalizeJobStatus(status)
 	res.Message = sanitizeJobMessage(message)
+
+	// 失败不当天作废：上游的每日任务在失败后当天仍可再试（当天积分不该因为
+	// 一次网络抖动就丢掉）。这里释放幂等锁让后续 tick 重试，同时用 Meta 计数
+	// 限制当天最多 maxJobAttemptsPerDay 次，避免 15 分钟一轮变成刷接口。
+	if res.Status == jobStatusFailed {
+		if attempts, capped := r.bumpJobAttempts(store, spec.Key, p, now); capped {
+			res.Message = sanitizeJobMessage(res.Message + "（今日重试次数已用尽）")
+			_ = attempts
+		} else {
+			release() // 允许本轮之后重试
+		}
+	}
+
 	r.recordJobRun(store, spec.Key, p, trigger, res, started, &finished)
 	return res, true
+}
+
+// bumpJobAttempts 累加当天的失败次数；返回（累计次数, 是否已达上限）。
+//
+// Meta 形状：{"jobAttempts": {"<jobKey>": {"date": "2006-01-02", "n": 2}}}。
+// 计数失败只记日志：它只是防刷的柔性限制，绝不能因为写 Meta 失败就让任务报错。
+func (r *Runtime) bumpJobAttempts(store jobsStore, jobKey string, p *model.Provider, now time.Time) (int, bool) {
+	if store == nil || p == nil {
+		return 0, false
+	}
+	today := localDay(now)
+	counts := map[string]any{}
+	state, err := store.GetWorkbuddyChannelState(p.UserID, p.ID)
+	if err == nil && state != nil {
+		if raw, ok := state.Meta[jobAttemptsMetaKey].(map[string]any); ok {
+			counts = raw
+		}
+	}
+	n := 1
+	if prev, ok := counts[jobKey].(map[string]any); ok {
+		if toText(prev["date"]) == today {
+			// jsonb 往返后是 float64，进程内可能是 int/其它数值 —— 两种都要认。
+			switch v := prev["n"].(type) {
+			case float64:
+				n = int(v) + 1
+			case int:
+				n = v + 1
+			case int64:
+				n = int(v) + 1
+			}
+		}
+	}
+	counts[jobKey] = map[string]any{"date": today, "n": n}
+	if err := store.UpdateWorkbuddyMeta(p.UserID, p.ID, jobAttemptsMetaKey, counts, now); err != nil {
+		log.Printf("[workbuddy] job attempt counter write failed provider=%d job=%s: %v", p.ID, jobKey, err)
+	}
+	return n, n >= maxJobAttemptsPerDay
 }
 
 // recordJobRun 双写执行日志与审计（互为佐证）。
@@ -767,6 +827,13 @@ func runCheckinJob(ctx context.Context, jc *JobContext) (string, string) {
 		return jobStatusFailed, "读取签到响应失败"
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// 国内版签到接口在今日已签到时返回 **HTTP 400 + {"code":10001,
+		// "msg":"今天已签到，请明天再来"}**（上游 0ba3a29 fix(checkin)，实测语义）。
+		// 这表示今日事实已完成，必须按成功记 —— 否则面板与执行日志会显示
+		// 「失败 · 今天已签到」这种自相矛盾的状态，且当天记录被当作未完成。
+		if checkinAlreadyDone(body) || checkinAlreadyDoneError(body) {
+			return jobStatusOK, withBusinessCode("今日已签到", businessCode(body))
+		}
 		return jobStatusFailed, jobUpstreamFailMessage("签到", resp.StatusCode, body)
 	}
 
@@ -777,6 +844,36 @@ func runCheckinJob(ctx context.Context, jc *JobContext) (string, string) {
 		return jobStatusOK, withBusinessCode("今日已签到", code)
 	}
 	return jobStatusOK, withBusinessCode("签到成功", code)
+}
+
+// checkinAlreadyDoneError 判断「上游把已签到当作错误返回」的形状。
+//
+// 只看结构化字段：code == 10001，或 msg 文案含「已签到」。刻意不看 HTTP 状态码 ——
+// 调用方只在非 2xx 分支调用它，2xx 的布尔字段判定由 checkinAlreadyDone 负责。
+func checkinAlreadyDoneError(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	var root map[string]any
+	if err := json.Unmarshal(body, &root); err != nil {
+		return false
+	}
+	if businessCode(body) == "10001" {
+		return true
+	}
+	for _, key := range []string{"msg", "message"} {
+		if strings.Contains(toText(root[key]), "已签到") {
+			return true
+		}
+	}
+	if d, ok := dataObject(root); ok {
+		for _, key := range []string{"msg", "message"} {
+			if strings.Contains(toText(d[key]), "已签到") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // runCreditsJob 积分刷新（复用 Runtime.ProbeCredits，其错误已是脱敏摘要）。

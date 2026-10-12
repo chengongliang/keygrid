@@ -154,6 +154,7 @@ type fakeLockStore struct {
 	mu       sync.Mutex
 	held     map[string]bool
 	acquired []string
+	released []string
 	denied   bool
 	err      error
 }
@@ -180,6 +181,7 @@ func (f *fakeLockStore) Release(_ context.Context, key string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.held, key)
+	f.released = append(f.released, key)
 }
 
 func (f *fakeLockStore) acquiredKeys() []string {
@@ -822,4 +824,123 @@ func TestJobHTTPClientHonoursProxy(t *testing.T) {
 	if _, err := r.jobHTTPClient(db, nil); err != nil {
 		t.Fatalf("nil 渠道应按未勾代理处理: %v", err)
 	}
+}
+
+// TestCheckinAlreadySignedIsSuccess 上游在今日已签到时返回 HTTP 400 + code 10001
+// （msg 含「今天已签到」），必须按成功记 —— 对齐上游 0ba3a29 的修复。
+func TestCheckinAlreadySignedIsSuccess(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"code=10001", `{"code":10001,"msg":"今天已签到，请明天再来"}`, true},
+		{"msg 已签到但 code 不同", `{"code":0,"msg":"今日已签到"}`, true},
+		{"嵌套 data 里的 msg", `{"code":1,"data":{"msg":"用户已签到"}}`, true},
+		{"其它 400 不误判", `{"code":11101,"msg":"Unmarshal chat params failed"}`, false},
+		{"空体不误判", ``, false},
+		{"非 JSON 不误判", `oops`, false},
+	}
+	for _, c := range cases {
+		if got := checkinAlreadyDoneError([]byte(c.body)); got != c.want {
+			t.Fatalf("%s: checkinAlreadyDoneError = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestCheckinJobAlreadySignedEndToEnd 端到端：上游 400+10001 时任务状态为 ok。
+func TestCheckinJobAlreadySignedEndToEnd(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"code":10001,"msg":"今天已签到，请明天再来"}`))
+	}))
+	defer up.Close()
+
+	orig := checkinURL
+	defer func() { checkinURL = orig }()
+	checkinURL = func(Realm) string { return up.URL }
+
+	cn := &model.Provider{ID: 7, UserID: 1, OAuthProvider: ProviderCN, BaseURL: "https://copilot.tencent.com"}
+	status, msg := runCheckinJob(t.Context(), &JobContext{
+		Provider: cn,
+		Tok:      &oauth.TokenSet{AccessToken: "wb-token"},
+		Runtime:  NewRuntime(nil, nil),
+	})
+	if status != jobStatusOK {
+		t.Fatalf("已签到应记成功, got status=%s msg=%s", status, msg)
+	}
+	if !strings.Contains(msg, "已签到") {
+		t.Fatalf("摘要应说明已签到: %q", msg)
+	}
+	if strings.Contains(msg, "super-secret") {
+		t.Fatalf("不应泄漏正文: %q", msg)
+	}
+}
+
+// TestFailedJobReleasesLockWithDailyCap 对齐上游「失败不消耗当天机会」的语义：
+// 任务失败时释放当日幂等锁（后续 tick 可重试），但当天最多重试
+// maxJobAttemptsPerDay 次，超过后保留锁并给出明确摘要，避免 15 分钟一轮刷接口。
+func TestFailedJobReleasesLockWithDailyCap(t *testing.T) {
+	const key = "zz_fail_job"
+	jobRegistry[key] = jobSpec{
+		Key:     key,
+		Timeout: defaultJobTimeout,
+		Handler: func(context.Context, *JobContext) (string, string) { return jobStatusFailed, "模拟失败" },
+	}
+	defer delete(jobRegistry, key)
+
+	p := cnProvider(1, 101)
+	db := newFakeJobsDB()
+	db.settingsByUser[1] = &model.WorkbuddySetting{UserID: 1, Enabled: true}
+	db.providersByUser[1] = []model.Provider{p}
+	db.platform[model.SettingWorkbuddyJobs] = "1" // 手动执行也要过平台总闸
+	db.statesByProvider[p.ID] = &model.WorkbuddyChannelState{UserID: 1, ProviderID: p.ID, Meta: map[string]any{}}
+	db.creds[p.ID] = &model.Credential{} // 有凭据才会走到任务体（否则在凭据步骤就失败）
+	stubJobToken(t)
+	lock := newFakeLockStore()
+	r := newJobsRuntime(db, lock)
+	// 用会真正落库的 Meta 写入器替换默认假实现（默认假实现只捕获不持久化，
+	// 计数读不回来会让上限断言失真）。
+	r.dbs = &retryMetaStore{fakeJobsDB: db}
+
+	now := time.Date(2026, 9, 30, 12, 0, 0, 0, time.Local)
+	for i := 1; i <= maxJobAttemptsPerDay; i++ {
+		res, err := r.runJobsAt(context.Background(), 1, key, p.ID, "manual", now)
+		if err != nil {
+			t.Fatalf("第 %d 次: %v", i, err)
+		}
+		if len(res) != 1 || res[0].Status != jobStatusFailed {
+			t.Fatalf("第 %d 次状态: %+v", i, res)
+		}
+		released := len(lock.released)
+		if i < maxJobAttemptsPerDay && released != i {
+			t.Fatalf("第 %d 次应释放锁以便重试, released=%d", i, released)
+		}
+		if i == maxJobAttemptsPerDay {
+			if released != i-1 {
+				t.Fatalf("达到上限后不应再释放锁, released=%d", released)
+			}
+			if !strings.Contains(res[0].Message, "重试次数已用尽") {
+				t.Fatalf("达到上限应给出明确摘要: %q", res[0].Message)
+			}
+		}
+	}
+}
+
+// retryMetaStore 让 Meta 写入真正落到运行态行上（覆盖测试假实现的捕获式写入）。
+type retryMetaStore struct{ *fakeJobsDB }
+
+func (s *retryMetaStore) UpdateWorkbuddyMeta(userID, providerID int64, key string, value any, now time.Time) error {
+	st := s.statesByProvider[providerID]
+	if st == nil {
+		st = &model.WorkbuddyChannelState{UserID: userID, ProviderID: providerID}
+	}
+	if st.Meta == nil {
+		st.Meta = map[string]any{}
+	}
+	st.Meta[key] = value
+	st.UpdatedAt = now
+	s.statesByProvider[providerID] = st
+	return nil
 }
