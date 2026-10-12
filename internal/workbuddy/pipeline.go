@@ -14,6 +14,9 @@ import (
 // marshal 关闭 HTML 转义，避免把 prompt 里的 <>& 改写成 \u003c。
 // 与 WBP 的差异：本函数按 KeyGrid 接线点重排为「先落 body、逐条归一化」，
 // 结果等价，并额外接受 model_map 的上游名 upModel。
+// 有意不移植 WBP:10746-10768 的 apply_prompt_mode，也不移植 WBP:10794-10795
+// （messages[0] 非 system 时强制插入网关 SYSTEM_PROMPT）：KeyGrid 不注入任何
+// 网关系统提示，见 docs/workbuddy-integration-design.md §3.7（第 389 行）。
 
 // NormalizeRequest 归一化上游请求体（OpenAI chat/completions 形态）。
 // p 用于判定区域（两区域共用同一上游协议，暂不分支）；upModel 是上游模型名
@@ -53,8 +56,11 @@ func NormalizeRequest(p *model.Provider, upModel string, body []byte, forceStrea
 			}
 		}
 	}
-	// 3. 工具配对自愈：先重排结果块、再对称裁剪孤儿。WBP:2477 / WBP:2546
+	// 3. 工具配对自愈：先合并被客户端拆开的相邻 tool_calls 声明、再重排结果块、
+	//    最后对称裁剪孤儿。顺序有语义：merge 必须早于 repack，否则 repack 看到的是
+	//    半截批次。WBP:2477 / WBP:2546 / WBP:10071（merge 为本轮新增）
 	if msgs, ok := obj["messages"].([]any); ok {
+		msgs, _ = mergeAdjacentToolCalls(msgs)
 		msgs, _ = toolRepackResults(msgs)
 		msgs, _ = toolCleanupOrphans(msgs)
 		obj["messages"] = msgs
@@ -62,14 +68,21 @@ func NormalizeRequest(p *model.Provider, upModel string, body []byte, forceStrea
 	normMaxTokens(obj)  // 4. max_completion_tokens → max_tokens。WBP:2756
 	normToolChoice(obj) // 5. tool_choice 归一化（对象触发上游 11101）。WBP:2664
 	normTools(obj)      // 6. 顶层 name 工具包成 function schema。WBP:2705
-	// 7. DeepSeek thinking 注入：仅 enabled 不足以打开 reasoning trace，必须搭一个
+	normStop(obj)       // 7. stop 字符串包成数组（上游 []string 收到字符串 400/11101）。WBP:10419
+	// 8. 未声明 max_tokens 时填模型目录的默认最大输出 token；未知模型保持缺省。WBP:10880
+	if _, ok := obj["max_tokens"]; !ok {
+		if def := modelDefaultMaxOutputTokens(upName); def > 0 {
+			obj["max_tokens"] = def
+		}
+	}
+	// 9. DeepSeek thinking 注入：仅 enabled 不足以打开 reasoning trace，必须搭一个
 	//    effort；客户端 disabled / effort=none 不注入。WBP:2964-3029
 	thinkingEnabled := normDeepSeekThinking(obj, upName)
-	// 8. reasoning_content 回填（上游 11155 要求 assistant 都带，且 len(reasoning)>0）。WBP:2622
+	// 10. reasoning_content 回填（上游 11155 要求 assistant 都带，且 len(reasoning)>0）。WBP:2622
 	if msgs, ok := obj["messages"].([]any); ok {
 		normBackfillReasoning(msgs, upName, thinkingEnabled)
 	}
-	// 9. 强制流式；不覆盖调用方已给的 stream_options。WBP:3039-3041
+	// 11. 强制流式；不覆盖调用方已给的 stream_options。WBP:3039-3041
 	if forceStream {
 		obj["stream"] = true
 		if _, ok := obj["stream_options"]; !ok {
@@ -90,7 +103,8 @@ var normFastProbes = [][]byte{
 	[]byte("developer"), []byte(`"tools"`), []byte("tool_choice"),
 	[]byte("max_completion_tokens"), []byte("thinking"), []byte("reasoning"),
 	[]byte(`"tool"`), []byte("tool_calls"), []byte("deepseek"),
-	[]byte(`"_`), // 额外的 tool_calls/deepseek/"_ 是保守保险：漏掉它们会让规则
+	[]byte(`"stop"`), // stop 需要用带引号的键探测：普通 prompt 文本里的 stop 不该触发
+	[]byte(`"_`),     // 额外的 tool_calls/deepseek/"_ 是保守保险：漏掉它们会让规则
 	// 3 / 7 / 1 在无 upModel 时被快路径跳过；宁可多走一次解析也不能漏改写。
 }
 
@@ -99,6 +113,15 @@ var normFastProbes = [][]byte{
 func normFastPath(body []byte, upModel string) bool {
 	if upModel != "" && !bytes.Contains(body, []byte(`"`+upModel+`"`)) {
 		return false
+	}
+	// 默认 max_tokens 填充（规则 8）：body 未携带 max_tokens 时是否要填取决于模型。
+	// 用带引号的键探测，prompt 文本里出现 max_tokens 不会误命中（JSON 里引号会被
+	// 转义成 \"，故不会匹配）。已知模型必须走完整路径；upModel 为空时模型名要先
+	// 解析才知道，同样保守走完整路径。
+	if !bytes.Contains(body, []byte(`"max_tokens"`)) {
+		if upModel == "" || modelDefaultMaxOutputTokens(upModel) > 0 {
+			return false
+		}
 	}
 	for _, probe := range normFastProbes {
 		if bytes.Contains(body, probe) {
@@ -116,6 +139,85 @@ func normSlice(v any) []any { s, _ := v.([]any); return s }
 
 // normString 取字符串值；非字符串返回空串。
 func normString(v any) string { s, _ := v.(string); return s }
+
+// normEmptyContent 判断「没有内容」：null / "" / [] 都算无内容（客户端对空内容的
+// 形状没有共识，漏判 [] 正是最早的 11148 案例）。其它类型（数字/对象/布尔）不算空。
+// WBP:10043-10057。
+func normEmptyContent(v any) bool {
+	switch t := v.(type) {
+	case nil:
+		return true
+	case string:
+		return t == ""
+	case []any:
+		return len(t) == 0
+	}
+	return false
+}
+
+// mergeReasoningContent 把 src 的 reasoning_content 折进 dst：两边都有时用换行
+// 拼接。非字符串 / 空串直接忽略。WBP:10059-10069。
+func mergeReasoningContent(dst, src map[string]any) {
+	rc, _ := src["reasoning_content"].(string)
+	if rc == "" {
+		return
+	}
+	if prev, _ := dst["reasoning_content"].(string); prev != "" {
+		dst["reasoning_content"] = prev + "\n" + rc
+		return
+	}
+	dst["reasoning_content"] = rc
+}
+
+// mergeAdjacentToolCalls 合并「背靠背」的两个 assistant 消息（同一并行 tool_calls
+// 批次被客户端拆成多条相邻 assistant）。DeepSeek 系上游对该形状回 400 /
+// tool_call_sequence_broken，且因为每次重试都重放同一段历史，换账号也救不回来。
+// 条件从严，不发明语义：
+//  1. 两条消息必须相邻；
+//  2. 后一条的 content 必须为空（null/""/[]）；
+//  3. 前一条必须已经是带 tool_calls 的 assistant。
+//
+// 另一形态：后一条是纯字符串 content 的 assistant，而前一条带 tool_calls 但自身
+// 无内容 —— 同一拆分批次的另一种重放顺序，折叠进前一条。
+// 两种形态都保留 reasoning_content（DeepSeek 多轮 thinking 要求回传）。
+// WBP:10071-10126。
+func mergeAdjacentToolCalls(messages []any) ([]any, bool) {
+	if len(messages) < 2 {
+		return messages, false
+	}
+	out, changed := make([]any, 0, len(messages)), false
+	for _, raw := range messages {
+		m := normMap(raw)
+		if m != nil && m["role"] == "assistant" && len(out) > 0 {
+			if prev := normMap(out[len(out)-1]); prev != nil && prev["role"] == "assistant" {
+				calls := normSlice(m["tool_calls"])
+				prevCalls := normSlice(prev["tool_calls"])
+				// 形态一：本条声明 tool_calls 且自身无内容。
+				if len(calls) > 0 && normEmptyContent(m["content"]) && len(prevCalls) > 0 {
+					prev["tool_calls"] = append(prevCalls, calls...)
+					mergeReasoningContent(prev, m)
+					changed = true
+					continue
+				}
+				// 形态二：本条是纯字符串内容；前一条带 tool_calls 且自身无内容。
+				if _, hasCalls := m["tool_calls"]; !hasCalls && len(prevCalls) > 0 {
+					if content, ok := m["content"].(string); ok && content != "" &&
+						normEmptyContent(prev["content"]) {
+						prev["content"] = content
+						mergeReasoningContent(prev, m)
+						changed = true
+						continue
+					}
+				}
+			}
+		}
+		out = append(out, raw)
+	}
+	if !changed {
+		return messages, false
+	}
+	return out, true
+}
 
 // toolRepackResults 让每个 assistant tool_calls 批次紧跟其结果块（只重排，
 // 结果相对顺序不变，闯入者移到批次后面）。WBP:2477-2544。
@@ -311,6 +413,36 @@ func normToolChoice(obj map[string]any) {
 	}
 }
 
+// normStop 归一化 stop 为上游唯一接受的字符串数组形态。WBP:10419-10448。
+// OpenAI 把 stop 声明成 string | array，客户端传单字符串完全合法；上游 Go 端却把
+// 该字段定死为 []string，收到字符串直接 400 / 11101。字符串包成单元素数组语义等价；
+// 数组只保留其中非空字符串且顺序不变；空串 / 空数组 / null / 其它类型一律删字段
+// ——它们的实际含义都是「没有停止序列」，而空值本身在上游同样判参数不合法。
+func normStop(obj map[string]any) {
+	raw, exists := obj["stop"]
+	if !exists {
+		return
+	}
+	var out []any
+	switch t := raw.(type) {
+	case string:
+		if t != "" {
+			out = []any{t}
+		}
+	case []any:
+		for _, item := range t {
+			if s, ok := item.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	if len(out) > 0 {
+		obj["stop"] = out
+		return
+	}
+	delete(obj, "stop")
+}
+
 // normTools 把「顶层 name」形态的 function 工具包成 function schema；非 dict
 // 条目丢弃，其余原样透传。WBP:2705-2731。
 func normTools(obj map[string]any) {
@@ -414,4 +546,79 @@ func normBackfillReasoning(messages []any, upName string, thinkingEnabled bool) 
 			}
 		}
 	}
+}
+
+// wbModelMaxOutputTokens 模型目录声明的默认最大输出 token 数，键为小写模型 id。
+//
+// 上游 wb_proxy.py 的 model_default_max_output_tokens（WBP:10880-10891）走
+// model_catalog_meta：先判区域，再查运行时模型缓存，缓存冷时回落到 wb_catalog 的
+// STATIC_CN_MODELS / STATIC_INTL_MODELS 静态表，最后按 id（忽略大小写）精确匹配
+// meta["maxOutputTokens"]。我们的 catalog.go 只落模型 id、不落目录元数据，因此这里
+// 只移植该查表形状的静态部分：键取自本仓库内嵌快照 snapshot/models_{intl,cn}.json
+// 的并集（即我们已经知道的那批模型 id），值取参考静态表同 id 的 maxOutputTokens。
+// 两区域取值无冲突，故合并成一张表、不再分区域。
+//
+// 未收录的 id（含未在我们快照里的 default-model / fast-model / balanced-model /
+// primary-model / deep-model 五个档位别名）返回 0，调用方保持 max_tokens 缺省 ——
+// 与参考「未知模型返回 None」的行为一致。后续 kimi 等目录补齐元数据后，这张表可
+// 直接换成运行时目录查询。
+var wbModelMaxOutputTokens = map[string]int64{
+	"deepseek-r1-0528":       8192,
+	"deepseek-r1-0528-lkeap": 16000,
+	"deepseek-v3-0324":       8192,
+	"deepseek-v3-0324-lkeap": 16000,
+	"deepseek-v3-1":          32000,
+	"deepseek-v3-1-lkeap":    32000,
+	"deepseek-v3-1-volc":     32000,
+	"deepseek-v3-2-volc":     32000,
+	"deepseek-v4-flash":      50000,
+	"deepseek-v4-pro":        50000,
+	"deepseek-v4.1-flash":    128000,
+	"default-1.1":            8192,
+	"default-1.2":            24000,
+	"gemini-3.5-flash":       65536,
+	"glm-4.6":                32000,
+	"glm-4.6v":               32000,
+	"glm-5.0-turbo":          48000,
+	"glm-5.1":                48000,
+	"glm-5.2":                48000,
+	"glm-5.3":                48000,
+	"glm-5.3-flash":          32000,
+	"glm-5v-turbo":           64000,
+	"gpt-5.3-codex":          72000,
+	"gpt-5.4":                72000,
+	"gpt-5.5":                128000,
+	"gpt-5.6-luna":           128000,
+	"gpt-5.6-sol":            128000,
+	"gpt-5.6-terra":          128000,
+	"gpt-6-astra":            128000,
+	"grok-4.7":               128000,
+	"hunyuan-2.0-instruct":   16000,
+	"hunyuan-chat":           8192,
+	"hy3":                    64000,
+	"hy3-x":                  64000,
+	"hy4-preview":            64000,
+	"hy4-preview-dev":        64000,
+	"hy4-preview-f":          64000,
+	"hy4-preview-x":          64000,
+	"kimi-k2-instruct-taiji": 8192,
+	"kimi-k2-thinking":       32000,
+	"kimi-k2.5":              32000,
+	"kimi-k2.6":              32000,
+	"kimi-k2.7":              32000,
+	"kimi-k2.8-preview":      32000,
+	"kimi-k3":                32000,
+	"kimi-k3-1":              32000,
+	"minimax-m2.5":           48000,
+	"minimax-m2.7":           48000,
+	"minimax-m3":             128000,
+}
+
+// modelDefaultMaxOutputTokens 返回模型目录声明的默认最大输出 token 数；未知模型
+// （或声明值 <=0）返回 0，调用方不填字段。查表忽略大小写与首尾空白。WBP:10880。
+func modelDefaultMaxOutputTokens(model string) int64 {
+	if model == "" {
+		return 0
+	}
+	return wbModelMaxOutputTokens[strings.ToLower(strings.TrimSpace(model))]
 }

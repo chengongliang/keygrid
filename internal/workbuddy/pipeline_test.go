@@ -383,3 +383,247 @@ func TestNormalizeInvalidJSON(t *testing.T) {
 		}
 	}
 }
+
+// TestNormalizeStop stop 归一化：字符串包成单元素数组、数组保序丢弃空/非字符串项、
+// 空串 / 空数组 / null / 数字一律删字段、无 stop 不发明字段。WBP:10419-10448。
+func TestNormalizeStop(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want []string // nil 表示字段应被删除
+	}{
+		{"字符串包成单元素数组", `{"model":"m","messages":[],"stop":"END"}`, []string{"END"}},
+		{"数组保序并丢弃空串", `{"model":"m","messages":[],"stop":["B","","A","C"]}`, []string{"B", "A", "C"}},
+		{"数组里的非字符串丢弃", `{"model":"m","messages":[],"stop":["A",5,null,"B"]}`, []string{"A", "B"}},
+		{"空字符串删字段", `{"model":"m","messages":[],"stop":""}`, nil},
+		{"空数组删字段", `{"model":"m","messages":[],"stop":[]}`, nil},
+		{"null 删字段", `{"model":"m","messages":[],"stop":null}`, nil},
+		{"数字删字段", `{"model":"m","messages":[],"stop":123}`, nil},
+		{"无 stop 不发明字段", `{"model":"m","messages":[]}`, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := normRun(t, c.body, "", true)
+			got, exists := m["stop"]
+			if c.want == nil {
+				if exists {
+					t.Fatalf("stop 应被删除, got %#v", got)
+				}
+				return
+			}
+			arr, ok := got.([]any)
+			if !ok || len(arr) != len(c.want) {
+				t.Fatalf("stop = %#v, want %v", got, c.want)
+			}
+			for i, want := range c.want {
+				if arr[i] != want {
+					t.Fatalf("stop[%d] = %#v, want %q", i, arr[i], want)
+				}
+			}
+		})
+	}
+}
+
+// normTestParseMsgs 把一个 JSON 数组解析成 messages 切片。
+func normTestParseMsgs(t *testing.T, raw string) []any {
+	t.Helper()
+	var msgs []any
+	if err := json.Unmarshal([]byte(raw), &msgs); err != nil {
+		t.Fatalf("messages JSON 解析失败: %v", err)
+	}
+	return msgs
+}
+
+// normTestCallIDs 取消息的 tool_calls id 列表。
+func normTestCallIDs(m map[string]any) []string {
+	var ids []string
+	for _, tc := range normSlice(m["tool_calls"]) {
+		ids = append(ids, normString(normMap(tc)["id"]))
+	}
+	return ids
+}
+
+// TestMergeAdjacentToolCalls 相邻 tool_calls 合并、拆分内容折叠、非相邻不动、
+// reasoning_content 保留。WBP:10071-10126。
+func TestMergeAdjacentToolCalls(t *testing.T) {
+	t.Run("相邻两条 tool_calls 按序合并", func(t *testing.T) {
+		msgs := normTestParseMsgs(t, `[
+			{"role":"assistant","content":null,"tool_calls":[{"id":"a","type":"function","function":{"name":"f"}}]},
+			{"role":"assistant","content":"","tool_calls":[{"id":"b","type":"function","function":{"name":"g"}}]}
+		]`)
+		got, changed := mergeAdjacentToolCalls(msgs)
+		if !changed || len(got) != 1 {
+			t.Fatalf("changed=%v len=%d, want true/1", changed, len(got))
+		}
+		ids := normTestCallIDs(normMap(got[0]))
+		if len(ids) != 2 || ids[0] != "a" || ids[1] != "b" {
+			t.Fatalf("合并后 id 顺序 = %v, want [a b]", ids)
+		}
+	})
+	t.Run("空数组 content 同样算无内容", func(t *testing.T) {
+		msgs := normTestParseMsgs(t, `[
+			{"role":"assistant","tool_calls":[{"id":"a","type":"function","function":{"name":"f"}}]},
+			{"role":"assistant","content":[],"tool_calls":[{"id":"b","type":"function","function":{"name":"g"}}]}
+		]`)
+		got, changed := mergeAdjacentToolCalls(msgs)
+		if !changed || len(got) != 1 || len(normTestCallIDs(normMap(got[0]))) != 2 {
+			t.Fatalf("[] 空内容应合并, changed=%v len=%d", changed, len(got))
+		}
+	})
+	t.Run("纯字符串内容折叠进前一条无内容的 tool_calls", func(t *testing.T) {
+		msgs := normTestParseMsgs(t, `[
+			{"role":"assistant","content":null,"tool_calls":[{"id":"a","type":"function","function":{"name":"f"}}]},
+			{"role":"assistant","content":"补充说明"}
+		]`)
+		got, changed := mergeAdjacentToolCalls(msgs)
+		if !changed || len(got) != 1 {
+			t.Fatalf("changed=%v len=%d, want true/1", changed, len(got))
+		}
+		if c := normString(normMap(got[0])["content"]); c != "补充说明" {
+			t.Fatalf("content = %q, want 补充说明", c)
+		}
+	})
+	t.Run("非相邻不动", func(t *testing.T) {
+		msgs := normTestParseMsgs(t, `[
+			{"role":"assistant","tool_calls":[{"id":"a","type":"function","function":{"name":"f"}}]},
+			{"role":"user","content":"插入"},
+			{"role":"assistant","tool_calls":[{"id":"b","type":"function","function":{"name":"g"}}]}
+		]`)
+		got, changed := mergeAdjacentToolCalls(msgs)
+		if changed || len(got) != 3 {
+			t.Fatalf("非相邻不应合并, changed=%v len=%d", changed, len(got))
+		}
+	})
+	t.Run("前一条有内容仍可合并（只要求后一条为空）", func(t *testing.T) {
+		msgs := normTestParseMsgs(t, `[
+			{"role":"assistant","content":"先说话","tool_calls":[{"id":"a","type":"function","function":{"name":"f"}}]},
+			{"role":"assistant","content":null,"tool_calls":[{"id":"b","type":"function","function":{"name":"g"}}]}
+		]`)
+		got, changed := mergeAdjacentToolCalls(msgs)
+		if !changed || len(got) != 1 || normString(normMap(got[0])["content"]) != "先说话" {
+			t.Fatalf("前一条有内容时应保留其内容并合并, changed=%v got=%#v", changed, got)
+		}
+	})
+	t.Run("后一条有内容的 tool_calls 不合并", func(t *testing.T) {
+		msgs := normTestParseMsgs(t, `[
+			{"role":"assistant","tool_calls":[{"id":"a","type":"function","function":{"name":"f"}}]},
+			{"role":"assistant","content":"不是空的","tool_calls":[{"id":"b","type":"function","function":{"name":"g"}}]}
+		]`)
+		got, changed := mergeAdjacentToolCalls(msgs)
+		if changed || len(got) != 2 {
+			t.Fatalf("后一条有内容时不应合并, changed=%v len=%d", changed, len(got))
+		}
+	})
+	t.Run("reasoning_content 保留（换行拼接 / 单侧）", func(t *testing.T) {
+		msgs := normTestParseMsgs(t, `[
+			{"role":"assistant","reasoning_content":"r1","tool_calls":[{"id":"a","type":"function","function":{"name":"f"}}]},
+			{"role":"assistant","reasoning_content":"r2","content":"","tool_calls":[{"id":"b","type":"function","function":{"name":"g"}}]},
+			{"role":"assistant","reasoning_content":"r3","content":null,"tool_calls":[{"id":"c","type":"function","function":{"name":"h"}}]}
+		]`)
+		got, changed := mergeAdjacentToolCalls(msgs)
+		if !changed || len(got) != 1 {
+			t.Fatalf("changed=%v len=%d, want true/1", changed, len(got))
+		}
+		if rc := normString(normMap(got[0])["reasoning_content"]); rc != "r1\nr2\nr3" {
+			t.Fatalf("reasoning_content = %q, want r1\\nr2\\nr3", rc)
+		}
+	})
+}
+
+// TestNormalizeMergeBeforeRepack 端到端证明规则 3 的顺序是 merge → repack：两条相邻
+// 的 assistant tool_calls 必须先合成一个批次，repack 才能把两条结果块收拢到同一条
+// assistant 之后。若顺序反了，repack 会把它们看成两个半截批次并原样留下。WBP:10808-10813。
+func TestNormalizeMergeBeforeRepack(t *testing.T) {
+	body := `{"model":"m","messages":[` +
+		`{"role":"user","content":"u"},` +
+		`{"role":"assistant","content":null,"tool_calls":[{"id":"a","type":"function","function":{"name":"f"}}]},` +
+		`{"role":"assistant","content":"","tool_calls":[{"id":"b","type":"function","function":{"name":"g"}}]},` +
+		`{"role":"tool","tool_call_id":"a","content":"ra"},` +
+		`{"role":"tool","tool_call_id":"b","content":"rb"}` +
+		`]}`
+	m := normRun(t, body, "", true)
+	msgs := normTestMessages(t, m)
+	if len(msgs) != 4 {
+		t.Fatalf("消息数 = %d, want 4（merge 先于 repack 才能合成一个批次）: %v", len(msgs), msgs)
+	}
+	if got := normString(normMap(msgs[0])["role"]); got != "user" {
+		t.Fatalf("messages[0].role = %q, want user", got)
+	}
+	asst := normMap(msgs[1])
+	if normString(asst["role"]) != "assistant" {
+		t.Fatalf("messages[1].role = %q, want assistant", normString(asst["role"]))
+	}
+	if ids := normTestCallIDs(asst); len(ids) != 2 || ids[0] != "a" || ids[1] != "b" {
+		t.Fatalf("合并后的 tool_calls = %v, want [a b]", ids)
+	}
+	for i, want := range []string{"tool", "tool"} {
+		mm := normMap(msgs[2+i])
+		if normString(mm["role"]) != want {
+			t.Fatalf("messages[%d].role = %q, want %q", 2+i, normString(mm["role"]), want)
+		}
+	}
+	if id := normString(normMap(msgs[2])["tool_call_id"]); id != "a" {
+		t.Fatalf("messages[2].tool_call_id = %q, want a", id)
+	}
+	if id := normString(normMap(msgs[3])["tool_call_id"]); id != "b" {
+		t.Fatalf("messages[3].tool_call_id = %q, want b", id)
+	}
+}
+
+// TestNormalizeDefaultMaxTokens 未声明 max_tokens 时填模型目录默认值；已声明不覆盖；
+// 未知模型不发明字段；别名优先于默认填充。WBP:10816-10822 / WBP:10880-10891。
+func TestNormalizeDefaultMaxTokens(t *testing.T) {
+	t.Run("已知模型未声明时填充默认值", func(t *testing.T) {
+		m := normRun(t, `{"model":"deepseek-v4.1-flash","messages":[]}`, "deepseek-v4.1-flash", false)
+		if got := m["max_tokens"]; got != float64(128000) {
+			t.Fatalf("max_tokens = %#v, want 128000", got)
+		}
+	})
+	t.Run("模型 id 大小写不敏感", func(t *testing.T) {
+		m := normRun(t, `{"model":"DEEPSEEK-V4.1-FLASH","messages":[]}`, "DEEPSEEK-V4.1-FLASH", false)
+		if got := m["max_tokens"]; got != float64(128000) {
+			t.Fatalf("max_tokens = %#v, want 128000", got)
+		}
+	})
+	t.Run("已知模型缺 max_tokens 时快路径必须让行", func(t *testing.T) {
+		body := []byte(`{"model":"kimi-k2.6","messages":[{"role":"user","content":"hi"}]}`)
+		out, err := NormalizeRequest(&model.Provider{}, "kimi-k2.6", body, false)
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if len(out) > 0 && &out[0] == &body[0] {
+			t.Fatal("已知模型缺 max_tokens 时不应走快路径（否则默认填充被跳过）")
+		}
+		var m map[string]any
+		if err := json.Unmarshal(out, &m); err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if m["max_tokens"] != float64(32000) {
+			t.Fatalf("max_tokens = %#v, want 32000", m["max_tokens"])
+		}
+	})
+	t.Run("已声明 max_tokens 不覆盖", func(t *testing.T) {
+		m := normRun(t, `{"model":"deepseek-v4.1-flash","messages":[],"max_tokens":100}`, "deepseek-v4.1-flash", false)
+		if got := m["max_tokens"]; got != float64(100) {
+			t.Fatalf("max_tokens = %#v, want 100", got)
+		}
+	})
+	t.Run("max_completion_tokens 别名优先于默认填充", func(t *testing.T) {
+		m := normRun(t, `{"model":"deepseek-v4.1-flash","messages":[],"max_completion_tokens":123}`, "deepseek-v4.1-flash", false)
+		if got := m["max_tokens"]; got != float64(123) {
+			t.Fatalf("max_tokens = %#v, want 123（别名转写后不应再被默认值覆盖）", got)
+		}
+	})
+	t.Run("未知模型不发明字段", func(t *testing.T) {
+		m := normRun(t, `{"model":"totally-unknown-model","messages":[]}`, "totally-unknown-model", false)
+		if got, ok := m["max_tokens"]; ok {
+			t.Fatalf("未知模型不应填 max_tokens, got %#v", got)
+		}
+	})
+	t.Run("无 upModel 时用 body 的模型名兜底", func(t *testing.T) {
+		m := normRun(t, `{"model":"hy3","messages":[]}`, "", false)
+		if got := m["max_tokens"]; got != float64(64000) {
+			t.Fatalf("max_tokens = %#v, want 64000", got)
+		}
+	})
+}
