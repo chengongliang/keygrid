@@ -18,6 +18,22 @@ package workbuddy
 // 轮询到 `completed`（即沙箱这一轮真的跑完）后才返回 ok；仅凭「建会话成功」绝不算
 // 成功。这是本文件最重要的正确性约束，勿当冗余删掉。
 //
+// ★出口代理★（wb_webagent.py:35-67、99-110，参考提交 a94eb84「网页通道 CONNECT
+// 带上代理认证，认证代理不再 407」）：网页通道的**每一条腿**都必须走账号/平台的出口
+// 代理 —— 控制台建会话、取沙箱、轮询状态，以及沙箱 link 的 SSE GET 与三个 JSON-RPC
+// POST。Python 参考里控制台腿走 urllib（ProxyHandler 自动加 Proxy-Authorization），
+// 而沙箱腿是裸 http.client + set_tunnel，凭据被丢掉才在认证代理上固定 407；修复是
+// 把 URL 里的 user:pass 显式转成 CONNECT 头。
+//
+// 本移植不需要 `_proxy_parts` 那种手工拼头：五条腿全部复用同一个
+// jc.httpClient()（← Runtime.jobHTTPClient ← httpx.Client(timeout, proxyURL)），
+// 由 net/http 的 Transport 统一处理 —— 代理 URL 里的 userinfo 会被自动翻成
+// `Proxy-Authorization: Basic ...`（HTTP 绝对形式与 HTTPS CONNECT 两条路径都加），
+// 且 Transport.Proxy 是固定函数，对沙箱 link 的另一个 host 同样生效、重定向也不会
+// 掉代理。关键约束因此只有一条：**五条腿必须共用这一个 client，不得有任何一条回落到
+// http.DefaultClient 或自建连接**（那等于静默直连、暴露真实出口 IP，正是 a94eb84 要
+// 杜绝的）。TestWebAgentProxyCoversEveryLeg 用离线 httptest 代理钉住该性质。
+//
 // 红线：日志与 Message 只允许出现状态字、计数、耗时、结构化上游错误码；绝不出现
 // prompt、SSE 正文、token 或响应体原文。
 
@@ -112,6 +128,14 @@ func runDailyChatWebJob(ctx context.Context, jc *JobContext) (status string, mes
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// 五条腿共用一个出口 client（见文件头「★出口代理★」）。外加一道兜底：
+	// jc.httpClient() 在 jc.Client == nil 时会回落到 http.DefaultClient —— 那既没有
+	// 平台代理也没有本函数的超时；对勾了代理的渠道就是静默直连（认证代理上表现成
+	// 407/直连泄漏真实 IP，与 a94eb84 的修复目标相悖）。任务框架的生产路径一定注入
+	// Runtime.jobHTTPClient 的代理客户端，这里只在缺失时明确失败，绝不直连。
+	if jc.Client == nil && jc.Provider.UseProxy {
+		return jobStatusFailed, "出口代理不可用"
+	}
 	client := jc.httpClient()
 	hdr := webConsoleHeaders(jc.Tok, realm)
 	started := time.Now()
@@ -140,6 +164,10 @@ func runDailyChatWebJob(ctx context.Context, jc *JobContext) (status string, mes
 	}
 
 	// 只有真的跑完才记 last conversation id（尽力而为，失败忽略）。
+	// 参考 93e9f26「网页腿失败不再写 lastDailyChat，当天积分留待重试」：网页腿是唯一
+	// 计入官方「每日活跃」的那条，失败若也落标记，当天后续巡检会直接跳过该账号，积分
+	// 静默丢掉。对应的三条失败 return 都在本行之前 —— 失败路径绝不写任何进度标记；
+	// 幂等锁的释放/当天重试由任务编排拥有（jobs.go:651-658）。
 	if perr := persistWebConversation(jc, convID); perr != nil {
 		webMetaWarnOnce.Do(func() {
 			log.Printf("[workbuddy] web checkin meta persist failed: %v", perr)

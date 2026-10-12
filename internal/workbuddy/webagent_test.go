@@ -13,16 +13,20 @@ package workbuddy
 //     不新增第三个假 DB。
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/chengongliang/keygrid/internal/httpx"
 	"github.com/chengongliang/keygrid/internal/model"
 	"github.com/chengongliang/keygrid/internal/oauth"
 )
@@ -70,6 +74,9 @@ func webMetaSnapshot() map[string]any {
 type webCall struct {
 	Method string
 	Path   string
+	// Host 仅代理记录使用：绝对形式请求的目标 host:port（用来区分控制台与沙箱
+	// link 两个不同 host 的腿）。
+	Host   string
 	Header http.Header
 	Body   string
 }
@@ -718,5 +725,299 @@ func TestWebAgentMissingSandbox(t *testing.T) {
 	}
 	if stub.linkCalls.count() != 0 {
 		t.Fatal("沙箱未就绪不得连接 link")
+	}
+}
+
+// ---- 9. 出口代理：五条腿全部走同一个代理客户端，且带凭据（参考 a94eb84） ----
+
+// newWebProxy 起一个「会记账、会转发」的离线 HTTP 代理：记录每条经它出去的请求
+// （含 Proxy-Authorization 与目标 host:port），再原样转发给真正的上游。用绝对形式
+// 请求判定「客户端确实把请求交给了代理」——绕过代理直连的腿不会出现在它的记录里。
+func newWebProxy(t *testing.T) (*httptest.Server, *webRecorder) {
+	t.Helper()
+	rec := &webRecorder{}
+	// 直连上游（Proxy=nil），避免测试机环境里的 *_proxy 变量把转发也带进代理。
+	direct := &http.Transport{}
+	t.Cleanup(direct.CloseIdleConnections)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		rec.add(webCall{
+			Method: r.Method,
+			Path:   r.URL.Path,
+			Host:   r.URL.Host,
+			Header: r.Header,
+			Body:   string(body),
+		})
+		if !r.URL.IsAbs() {
+			// 客户端发的是 origin-form，说明它没把请求交给代理。
+			http.Error(w, "not a proxy request", http.StatusBadRequest)
+			return
+		}
+		out, err := http.NewRequest(r.Method, r.URL.String(), bytes.NewReader(body))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		for k, vs := range r.Header {
+			// Proxy-Authorization 只属于「客户端 ↔ 代理」这一跳，不转发给上游。
+			if strings.EqualFold(k, "Proxy-Authorization") || strings.EqualFold(k, "Proxy-Connection") {
+				continue
+			}
+			for _, v := range vs {
+				out.Header.Add(k, v)
+			}
+		}
+		resp, err := direct.RoundTrip(out)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		for k, vs := range resp.Header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		flusher, _ := w.(http.Flusher)
+		buf := make([]byte, 4096)
+		for {
+			n, rerr := resp.Body.Read(buf)
+			if n > 0 {
+				_, _ = w.Write(buf[:n])
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+			if rerr != nil {
+				break
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, rec
+}
+
+// proxyClientWithCreds 构造「带凭据的平台代理客户端」：代理 URL 里的 userinfo 由
+// net/http 的 Transport 自动翻成 Proxy-Authorization（Go 侧等价于参考的 _proxy_parts，
+// wb_webagent.py:35-67 —— 先 unquote 再 base64）。
+func proxyClientWithCreds(t *testing.T, proxyURL string) *http.Client {
+	t.Helper()
+	c, err := httpx.Client(jobUpstreamTimeout, proxyURL)
+	if err != nil {
+		t.Fatalf("httpx.Client(%q) = %v", proxyURL, err)
+	}
+	return c
+}
+
+func wantBasicAuth(user, pass string) string {
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
+}
+
+// TestWebAgentProxyCoversEveryLeg 用离线 httptest 代理钉住 a94eb84 的性质：
+//   - 控制台建会话 / 取沙箱 / 轮询、沙箱 SSE GET、三个 JSON-RPC POST 全部经代理；
+//   - 每条都可能带凭据（认证代理不再 407）；
+//   - 沙箱 link 与控制台是不同 host，两条都走同一代理（参考 run_turn 也传 proxy）。
+func TestWebAgentProxyCoversEveryLeg(t *testing.T) {
+	cases := []struct {
+		name string
+		user string
+		pass string
+		// escaped 用含 @ / : 的凭据，验证百分号转义后与 urllib 同口径解码。
+		escaped bool
+	}{
+		{name: "普通凭据", user: "alice", pass: "s3cret"},
+		{name: "转义凭据", user: "us@er", pass: "pa:ss", escaped: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetWebMeta()
+			stub := newWebStub(t, webStubOpts{
+				// 先 pending 再 completed：确认轮询腿也在代理记录里。
+				statuses: []string{"pending", "completed"},
+				linkBody: webTestSSE,
+			})
+			proxySRV, proxyRec := newWebProxy(t)
+			stubWebBase(t, stub.console.URL)
+			stubWebPollInterval(t, time.Millisecond)
+
+			pu, err := url.Parse(proxySRV.URL)
+			if err != nil {
+				t.Fatalf("解析代理地址: %v", err)
+			}
+			pu.User = url.UserPassword(tc.user, tc.pass)
+			proxyURL := pu.String()
+			if tc.escaped && !strings.Contains(proxyURL, "%40") && !strings.Contains(proxyURL, "%3A") {
+				t.Fatalf("转义用例的代理 URL 未出现转义字符: %q", proxyURL)
+			}
+
+			client := proxyClientWithCreds(t, proxyURL)
+			provider := intlProvider(101, 10, "https://www.workbuddy.ai")
+			provider.UseProxy = true
+			jc, _ := newWebJobContext(t, client, provider, "sandbox-secret-token")
+
+			status, msg := runDailyChatWebJob(context.Background(), jc)
+			if status != jobStatusOK {
+				t.Fatalf("status = %q (msg=%q), want ok", status, msg)
+			}
+			assertNoLeak(t, msg)
+
+			consoleHost := strings.TrimPrefix(stub.console.URL, "http://")
+			linkHost := strings.TrimPrefix(stub.link.URL, "http://")
+			if consoleHost == linkHost {
+				t.Fatal("测试前提：控制台与沙箱 link 应是不同 host")
+			}
+			pc := proxyRec.snap()
+
+			// (a) 上游直收的请求数 == 经代理的请求数：没有腿绕过代理。
+			if got, want := len(pc), stub.consoleCalls.count()+stub.linkCalls.count(); got != want {
+				t.Fatalf("经代理请求 = %d, 上游直收 = %d（差集即绕过代理的腿）", got, want)
+			}
+
+			// (b) 每条经代理的请求都带正确凭据。
+			wantAuth := wantBasicAuth(tc.user, tc.pass)
+			for i, c := range pc {
+				if got := c.Header.Get("Proxy-Authorization"); got != wantAuth {
+					t.Fatalf("代理请求[%d] %s %s %s Proxy-Authorization = %q, want %q",
+						i, c.Host, c.Method, c.Path, got, wantAuth)
+				}
+			}
+
+			// (c) 五条腿逐一出现。
+			isConsole := func(c webCall) bool { return c.Host == consoleHost }
+			isLink := func(c webCall) bool { return c.Host == linkHost }
+			if _, ok := firstCall(pc, func(c webCall) bool {
+				return isConsole(c) && c.Method == http.MethodPost && c.Path == WebConversationsPath
+			}); !ok {
+				t.Fatal("控制台建会话腿没有走代理")
+			}
+			if _, ok := firstCall(pc, func(c webCall) bool {
+				return isConsole(c) && strings.HasSuffix(c.Path, "/session")
+			}); !ok {
+				t.Fatal("取沙箱腿没有走代理")
+			}
+			if _, ok := firstCall(pc, func(c webCall) bool {
+				return isConsole(c) && c.Method == http.MethodGet && !strings.HasSuffix(c.Path, "/session")
+			}); !ok {
+				t.Fatal("状态轮询腿没有走代理")
+			}
+			if _, ok := firstCall(pc, func(c webCall) bool {
+				return isLink(c) && c.Method == http.MethodGet
+			}); !ok {
+				t.Fatal("沙箱 SSE GET 腿没有走代理")
+			}
+			rpcOnLink := 0
+			for _, c := range pc {
+				if isLink(c) && c.Method == http.MethodPost {
+					rpcOnLink++
+				}
+			}
+			if rpcOnLink != 3 {
+				t.Fatalf("沙箱 JSON-RPC POST 经代理数 = %d, want 3（initialize/session/load/session/prompt）", rpcOnLink)
+			}
+			if stub.pollCount() < 2 {
+				t.Fatalf("轮询次数 = %d, want >=2", stub.pollCount())
+			}
+		})
+	}
+}
+
+// TestWebAgentProxyRequiredNeverFallsBackToDefaultClient：渠道勾了代理、但任务框架没
+// 给出出口客户端时，宁可 failed 也绝不回落到 http.DefaultClient 直连（那会同时丢掉
+// 平台代理与凭据，正是 a94eb84 在 Python 侧修掉的 407 同源问题）。
+func TestWebAgentProxyRequiredNeverFallsBackToDefaultClient(t *testing.T) {
+	resetWebMeta()
+	stub := newWebStub(t, webStubOpts{})
+	stubWebBase(t, stub.console.URL)
+	provider := intlProvider(101, 10, "https://www.workbuddy.ai")
+	provider.UseProxy = true
+	jc, _ := newWebJobContext(t, nil, provider, "tok") // Client == nil → DefaultClient 回落路径
+
+	status, msg := runDailyChatWebJob(context.Background(), jc)
+	if status != jobStatusFailed {
+		t.Fatalf("status = %q (msg=%q), want failed", status, msg)
+	}
+	if !strings.Contains(msg, "出口代理") {
+		t.Fatalf("摘要应说明代理不可用: %q", msg)
+	}
+	if stub.consoleCalls.count() != 0 || stub.linkCalls.count() != 0 {
+		t.Fatalf("不得发起任何直连请求: console=%d link=%d", stub.consoleCalls.count(), stub.linkCalls.count())
+	}
+	if len(webMetaSnapshot()) != 0 {
+		t.Fatal("失败不得写进度标记")
+	}
+}
+
+// ---- 10. 失败不记当日标记（参考 93e9f26 的 Go 对应语义） ----
+
+// TestWebAgentFailureLeavesLastConversationUnset：只有真正 completed 才写
+// acpLastConversationID；任何失败（会话 failed / 排队超时 / 传输错误）都不得留下进度
+// 标记。参考 93e9f26 的教训是「网页腿失败也写 lastDailyChat → 当天直接跳过、积分静默
+// 丢掉」，在 Go 侧对应「失败不得写 Meta」。当天的重试/幂等锁由任务编排拥有（jobs.go）。
+func TestWebAgentFailureLeavesLastConversationUnset(t *testing.T) {
+	cases := []struct {
+		name string
+		opts webStubOpts
+		env  string
+	}{
+		{
+			name: "会话 failed",
+			opts: webStubOpts{statuses: []string{"working", "failed"}, linkBody: webTestSSE},
+		},
+		{
+			name: "排队永不 completed",
+			opts: webStubOpts{statuses: []string{"pending"}, linkBody: webTestSSE},
+			env:  "300ms",
+		},
+		{
+			name: "取沙箱失败",
+			opts: webStubOpts{sessionStatus: http.StatusInternalServerError, sessionBody: `{"error":{"message":"boom"}}`},
+		},
+		{
+			name: "SSE 连接失败",
+			opts: webStubOpts{linkSSEStatus: http.StatusInternalServerError},
+		},
+		{
+			name: "建会话失败",
+			opts: webStubOpts{createStatus: http.StatusInternalServerError, createBody: `{"error":{"message":"boom"}}`},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetWebMeta()
+			if tc.env != "" {
+				t.Setenv(webTurnTimeoutEnv, tc.env)
+			}
+			stub := newWebStub(t, tc.opts)
+			stubWebBase(t, stub.console.URL)
+			stubWebPollInterval(t, 5*time.Millisecond)
+			jc, _ := newWebJobContext(t, stub.console.Client(), intlProvider(101, 10, "https://www.workbuddy.ai"), "tok")
+
+			status, msg := runDailyChatWebJob(context.Background(), jc)
+			if status != jobStatusFailed {
+				t.Fatalf("status = %q (msg=%q), want failed", status, msg)
+			}
+			if meta := webMetaSnapshot(); len(meta) != 0 {
+				t.Fatalf("失败运行留下了进度标记 %v（当天将不再重试）", meta)
+			}
+		})
+	}
+}
+
+// TestWebAgentSuccessSetsLastConversation 反面基线：真 completed 才落标记。
+func TestWebAgentSuccessSetsLastConversation(t *testing.T) {
+	resetWebMeta()
+	stub := newWebStub(t, webStubOpts{statuses: []string{"completed"}, linkBody: webTestSSE})
+	stubWebBase(t, stub.console.URL)
+	stubWebPollInterval(t, time.Millisecond)
+	jc, _ := newWebJobContext(t, stub.console.Client(), intlProvider(101, 10, "https://www.workbuddy.ai"), "tok")
+
+	status, msg := runDailyChatWebJob(context.Background(), jc)
+	if status != jobStatusOK {
+		t.Fatalf("status = %q (msg=%q), want ok", status, msg)
+	}
+	meta := webMetaSnapshot()
+	if got := meta[webMetaKeyLastConversation]; got != "conv-1" {
+		t.Fatalf("成功应写 %s=conv-1, got %v", webMetaKeyLastConversation, meta)
 	}
 }
