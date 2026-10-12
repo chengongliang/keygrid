@@ -372,6 +372,17 @@ func TestCooldownFor(t *testing.T) {
 		{"恰好 1h 不截断", Event{Status: 429, RetryAfter: time.Hour}, time.Hour},
 		{"超长 Retry-After 封顶 1h", Event{Status: 429, RetryAfter: 24 * time.Hour}, maxCooldown},
 		{"极端 Retry-After 仍封顶 1h", Event{Status: 429, RetryAfter: 365 * 24 * time.Hour}, maxCooldown},
+
+		// ---- 风控 403(11140)：固定 2h，绕过 1h 上限、不采信 Retry-After ----
+		// 对齐参考实现 RESTRICTED_403_COOLDOWN = 7200.0（commit be4f9f8 / PR #288）。
+		{"风控 403 无 Retry-After 默认 2h", Event{Status: 403, UpCode: upstreamCodeAccountRestricted}, riskCooldown},
+		{"风控 403 的 Retry-After 不改写 2h", Event{Status: 403, UpCode: upstreamCodeAccountRestricted, RetryAfter: 5 * time.Second}, riskCooldown},
+		{"风控 403 的 2h 不被 1h 上限裁剪", Event{Status: 403, UpCode: upstreamCodeAccountRestricted, RetryAfter: time.Hour}, riskCooldown},
+		// 同码但状态不是 403（防御）：按普通冷却处理，避免把未知语义当风控。
+		{"11140 但状态 200 不算风控", Event{Status: 200, UpCode: upstreamCodeAccountRestricted}, defaultCooldown},
+		// 内容审核 / 未知 403 / 未知 5xx：不走风控分支。
+		{"内容审核 403 走默认冷却", Event{Status: 403, UpCode: 10001}, defaultCooldown},
+		{"未知 403（code=0）走默认冷却", Event{Status: 403}, defaultCooldown},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -430,6 +441,10 @@ func TestLocalDayBoundary(t *testing.T) {
 func TestRedisKeyFormats(t *testing.T) {
 	if got, want := cooldownKey("workbuddy", 7, "claude-3-5-sonnet"), "workbuddy:cd:7:claude-3-5-sonnet"; got != want {
 		t.Fatalf("cooldownKey = %q, want %q", got, want)
+	}
+	// 渠道级风控冷却用通配键。
+	if got, want := cooldownKey("workbuddy", 7, allModelsGlob), "workbuddy:cd:7:*"; got != want {
+		t.Fatalf("渠道级 cooldownKey = %q, want %q", got, want)
 	}
 	if got, want := tokensKey("workbuddy", 7, "2025-03-14"), "workbuddy:tokens:7:2025-03-14"; got != want {
 		t.Fatalf("tokensKey = %q, want %q", got, want)
@@ -757,7 +772,10 @@ func TestObserveCooldownWritesRedisAndPostgres(t *testing.T) {
 
 func TestObserveCooldownCapsHugeRetryAfter(t *testing.T) {
 	p := stateTestProvider()
-	db := &fakeDB{state: &model.WorkbuddyChannelState{UserID: p.UserID, ProviderID: p.ID}}
+	db := &fakeDB{
+		settings: &model.WorkbuddySetting{Enabled: true},
+		state:    &model.WorkbuddyChannelState{UserID: p.UserID, ProviderID: p.ID},
+	}
 	cs := newFakeCounter(func() time.Time { return stateTestNow })
 	rt := newTestRuntime(db, cs, stateTestNow)
 	rt.Observe(Event{Provider: p, UpModel: "m", Status: 429, RetryAfter: 24 * time.Hour})
@@ -774,7 +792,10 @@ func TestObserveCooldownDefaultsAndUpstreamCode(t *testing.T) {
 	p := stateTestProvider()
 
 	// Retry-After 缺失 → 默认 60s。
-	db := &fakeDB{state: &model.WorkbuddyChannelState{UserID: p.UserID, ProviderID: p.ID}}
+	db := &fakeDB{
+		settings: &model.WorkbuddySetting{Enabled: true},
+		state:    &model.WorkbuddyChannelState{UserID: p.UserID, ProviderID: p.ID},
+	}
 	cs := newFakeCounter(func() time.Time { return stateTestNow })
 	rt := newTestRuntime(db, cs, stateTestNow)
 	rt.Observe(Event{Provider: p, UpModel: "m", Status: 429})
@@ -795,6 +816,35 @@ func TestObserveCooldownDefaultsAndUpstreamCode(t *testing.T) {
 	}
 }
 
+// TestObserve429WithoutHintStaysModelScoped 钉住 429 的作用域映射（参考实现
+// wb_accounts.py:414-450 / wb_proxy.py:11531）：没有 Retry-After 的 429 走
+// 模型级 60s，不写渠道级通配键 —— 参考实现只在正文声明凭证级时才给账号
+// 600s→2h 阶梯，且它专门修掉了「裸 429 冷却整个账号」的故障
+// （wb_proxy.py:11263 rate_limit_is_account_level docstring）；我们的 Event
+// 拿不到正文作用域，因此保持模型级默认，不做 600s 猜测。
+func TestObserve429WithoutHintStaysModelScoped(t *testing.T) {
+	p := stateTestProvider()
+	db := &fakeDB{
+		settings: &model.WorkbuddySetting{Enabled: true},
+		state:    &model.WorkbuddyChannelState{UserID: p.UserID, ProviderID: p.ID},
+	}
+	cs := newFakeCounter(func() time.Time { return stateTestNow })
+	rt := newTestRuntime(db, cs, stateTestNow)
+
+	rt.Observe(Event{Provider: p, UpModel: "m", Status: http.StatusTooManyRequests})
+
+	if got := cs.ttl(cooldownKey("workbuddy", p.ID, "m")); got != defaultCooldown {
+		t.Fatalf("无提示 429 应为模型级 60s, ttl=%v", got)
+	}
+	if got := cs.ttl(cooldownKey("workbuddy", p.ID, allModelsGlob)); got != 0 {
+		t.Fatalf("无提示 429 不应冷却整个渠道, 通配 ttl=%v", got)
+	}
+	// 别的模型照常可用（模型级窗口的语义）。
+	if err := rt.Admit(p, "other"); err != nil {
+		t.Fatalf("无提示 429 不应牵连其它模型, got %v", err)
+	}
+}
+
 func TestObserveCooldownWithoutRedis(t *testing.T) {
 	p := stateTestProvider()
 	db := &fakeDB{state: &model.WorkbuddyChannelState{UserID: p.UserID, ProviderID: p.ID}}
@@ -811,13 +861,195 @@ func TestObserveCooldownWithoutRedis(t *testing.T) {
 
 func TestObserveUnrelatedFailureDoesNothing(t *testing.T) {
 	p := stateTestProvider()
-	db := &fakeDB{state: &model.WorkbuddyChannelState{UserID: p.UserID, ProviderID: p.ID}}
+	db := &fakeDB{
+		settings: &model.WorkbuddySetting{Enabled: true},
+		state:    &model.WorkbuddyChannelState{UserID: p.UserID, ProviderID: p.ID},
+	}
 	cs := newFakeCounter(func() time.Time { return stateTestNow })
 	rt := newTestRuntime(db, cs, stateTestNow)
 	rt.Observe(Event{Provider: p, UpModel: "m", Status: 500})
 
 	if len(db.upserts) != 0 || cs.ttl(cooldownKey("workbuddy", p.ID, "m")) != 0 {
 		t.Fatal("非成功/非 429-6004 不应产生任何写")
+	}
+}
+
+// ---- Observe：风控 403(11140) 与内容审核 403 分流 ----
+
+// TestObserveRiskControl403CoolsWholeChannel 钉住 be4f9f8 / PR #288 的行为：
+// 上游 403 + code 11140（账号存在异常行为，已被限制使用）是账号级的坏，
+// 冷却整条渠道 2h（通配键，对所有模型生效），而不是只停当前模型。
+func TestObserveRiskControl403CoolsWholeChannel(t *testing.T) {
+	p := stateTestProvider()
+	db := &fakeDB{
+		settings: &model.WorkbuddySetting{Enabled: true},
+		state:    &model.WorkbuddyChannelState{UserID: p.UserID, ProviderID: p.ID},
+	}
+	cs := newFakeCounter(func() time.Time { return stateTestNow })
+	rt := newTestRuntime(db, cs, stateTestNow)
+
+	rt.Observe(Event{Provider: p, UpModel: "m", Status: http.StatusForbidden, UpCode: upstreamCodeAccountRestricted})
+
+	wantUntil := stateTestNow.Add(riskCooldown)
+	// Redis：整条渠道的通配冷却键，TTL = 2h。
+	key := cooldownKey("workbuddy", p.ID, allModelsGlob)
+	raw, ok := cs.Get(context.Background(), key)
+	if !ok {
+		t.Fatalf("风控 403 应写通配 Redis 冷却键 %s", key)
+	}
+	until, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil || !until.Equal(wantUntil) {
+		t.Fatalf("通配冷却截止 = %v（err=%v）, want %v", until, err, wantUntil)
+	}
+	if got := cs.ttl(key); got != riskCooldown {
+		t.Fatalf("通配冷却 TTL = %v, want %v", got, riskCooldown)
+	}
+	// 不写模型级键：风控是账号级，模型级键会给「别的模型照用」留口子。
+	if _, ok := cs.Get(context.Background(), cooldownKey("workbuddy", p.ID, "m")); ok {
+		t.Fatal("风控 403 不应写模型级冷却键")
+	}
+	// Postgres：同样只写通配键。
+	if got, ok := db.state.Cooldowns[allModelsGlob]; !ok || !got.Equal(wantUntil) {
+		t.Fatalf("Postgres 通配冷却 = %v（ok=%v）, want %v", got, ok, wantUntil)
+	}
+	if _, ok := db.state.Cooldowns["m"]; ok {
+		t.Fatal("Postgres 不应写模型级冷却")
+	}
+	if len(db.upserts) != 1 {
+		t.Fatalf("应写一次运行态, upserts=%d", len(db.upserts))
+	}
+
+	// 渠道级生效：请求任何模型都被准入拦下，并带 2h 恢复时间（客户端可退避）。
+	for _, upModel := range []string{"m", "another-model"} {
+		pe := parkedOf(t, rt.Admit(p, upModel))
+		if pe.Reason != reasonCooldown {
+			t.Fatalf("模型 %q: Reason = %q, want cooldown", upModel, pe.Reason)
+		}
+		if !pe.Until.Equal(wantUntil) {
+			t.Fatalf("模型 %q: Until = %v, want %v", upModel, pe.Until, wantUntil)
+		}
+	}
+}
+
+// TestObserveContentModeration403NoCooldown 钉住分流：内容审核 403（如 code
+// 10001）与未知 403 保持原有行为 —— 不给账号上长冷却（这不是账号的坏），
+// 只照常 failover 换号。
+func TestObserveContentModeration403NoCooldown(t *testing.T) {
+	p := stateTestProvider()
+	for _, tc := range []struct {
+		name   string
+		upCode int
+	}{
+		{"内容审核 10001", 10001},
+		{"未知 403（code=0）", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := &fakeDB{
+				settings: &model.WorkbuddySetting{Enabled: true},
+				state:    &model.WorkbuddyChannelState{UserID: p.UserID, ProviderID: p.ID},
+			}
+			cs := newFakeCounter(func() time.Time { return stateTestNow })
+			rt := newTestRuntime(db, cs, stateTestNow)
+
+			rt.Observe(Event{Provider: p, UpModel: "m", Status: http.StatusForbidden, UpCode: tc.upCode})
+
+			if len(db.upserts) != 0 {
+				t.Fatalf("不应写运行态, upserts=%d", len(db.upserts))
+			}
+			if len(db.state.Cooldowns) != 0 {
+				t.Fatalf("不应写冷却, cooldowns=%v", db.state.Cooldowns)
+			}
+			if got := cs.ttl(cooldownKey("workbuddy", p.ID, allModelsGlob)); got != 0 {
+				t.Fatalf("不应写通配冷却键, ttl=%v", got)
+			}
+			if got := cs.ttl(cooldownKey("workbuddy", p.ID, "m")); got != 0 {
+				t.Fatalf("不应写模型冷却键, ttl=%v", got)
+			}
+			if err := rt.Admit(p, "m"); err != nil {
+				t.Fatalf("内容审核/未知 403 不应准入拦截, got %v", err)
+			}
+		})
+	}
+}
+
+// TestObserveUnknown5xxTransientNoCooldown 钉住 PR #288 的另一半：一切 >=500
+// （含上游自定义的 550）按瞬时故障处理，不写账号冷却；换号由 relay 的 failover
+// 负责（任何 callErr / status>=500 都会 continue 到下一候选，见 relay/route.go
+// shouldFailover），所以 workbuddy 侧不加冗余冷却。
+func TestObserveUnknown5xxTransientNoCooldown(t *testing.T) {
+	p := stateTestProvider()
+	for _, status := range []int{500, 502, 503, 504, 550} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			db := &fakeDB{
+				settings: &model.WorkbuddySetting{Enabled: true},
+				state:    &model.WorkbuddyChannelState{UserID: p.UserID, ProviderID: p.ID},
+			}
+			cs := newFakeCounter(func() time.Time { return stateTestNow })
+			rt := newTestRuntime(db, cs, stateTestNow)
+
+			rt.Observe(Event{Provider: p, UpModel: "m", Status: status})
+
+			if len(db.upserts) != 0 || len(db.state.Cooldowns) != 0 {
+				t.Fatalf("5xx %d 不应写冷却: upserts=%d cooldowns=%v", status, len(db.upserts), db.state.Cooldowns)
+			}
+			if got := cs.ttl(cooldownKey("workbuddy", p.ID, allModelsGlob)); got != 0 {
+				t.Fatalf("5xx %d 不应写通配冷却键, ttl=%v", status, got)
+			}
+			if err := rt.Admit(p, "m"); err != nil {
+				t.Fatalf("5xx %d 不应准入拦截, got %v", status, err)
+			}
+		})
+	}
+}
+
+// TestAdmitChannelWideCooldownFromRedis 渠道级冷却只存在于 Redis（Postgres 行
+// 尚未回写）时也必须生效 —— 转发热路径优先读 Redis。
+func TestAdmitChannelWideCooldownFromRedis(t *testing.T) {
+	p := stateTestProvider()
+	cs := newFakeCounter(func() time.Time { return stateTestNow })
+	until := stateTestNow.Add(90 * time.Minute)
+	cs.Set(context.Background(), cooldownKey("workbuddy", p.ID, allModelsGlob),
+		until.UTC().Format(time.RFC3339Nano), 90*time.Minute)
+
+	db := &fakeDB{
+		settings: &model.WorkbuddySetting{Enabled: true},
+		state:    &model.WorkbuddyChannelState{UserID: p.UserID, ProviderID: p.ID},
+	}
+	rt := newTestRuntime(db, cs, stateTestNow)
+	pe := parkedOf(t, rt.Admit(p, "any-model"))
+	if pe.Reason != reasonCooldown || !pe.Until.Equal(until) {
+		t.Fatalf("Redis 渠道级冷却未命中: reason=%q until=%v", pe.Reason, pe.Until)
+	}
+}
+
+// TestAdmitCooldownTakesLaterOfChannelAndModel 渠道级与模型级冷却并存时取较晚者：
+// 一条更短的模型冷却不能把 2h 的风控冷却「盖短」，反之亦然。
+func TestAdmitCooldownTakesLaterOfChannelAndModel(t *testing.T) {
+	p := stateTestProvider()
+	cases := []struct {
+		name    string
+		channel time.Time
+		model   time.Time
+		want    time.Time
+	}{
+		{"渠道更晚取渠道", stateTestNow.Add(riskCooldown), stateTestNow.Add(5 * time.Minute), stateTestNow.Add(riskCooldown)},
+		{"模型更晚取模型", stateTestNow.Add(time.Hour), stateTestNow.Add(3 * time.Hour), stateTestNow.Add(3 * time.Hour)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := &fakeDB{
+				settings: &model.WorkbuddySetting{Enabled: true},
+				state: &model.WorkbuddyChannelState{
+					UserID: p.UserID, ProviderID: p.ID,
+					Cooldowns: map[string]time.Time{allModelsGlob: tc.channel, "m": tc.model},
+				},
+			}
+			rt := newTestRuntime(db, nil, stateTestNow)
+			pe := parkedOf(t, rt.Admit(p, "m"))
+			if pe.Reason != reasonCooldown || !pe.Until.Equal(tc.want) {
+				t.Fatalf("Until = %v（reason=%q）, want %v", pe.Until, pe.Reason, tc.want)
+			}
+		})
 	}
 }
 
@@ -910,6 +1142,14 @@ func TestProbeCreditsSuccessFieldVariants(t *testing.T) {
 		{"顶层 available 回落", `{"code":0,"available":9}`, 9},
 		{"字段名大小写不敏感", `{"code":0,"DATA":{"Remaining":3}}`, 3},
 		{"优先级 remaining 高于 balance", `{"data":{"balance":1,"remaining":2}}`, 2},
+		// 上游聚合形状（wb_accounts.py:1792 把各积分包 remain 求和写入 credits）：
+		// remain 是唯一数值，解析结果就是该渠道可用于判定的积分。
+		{"上游聚合形状 remain", `{"code":0,"data":{"remain":42.5,"used":7.5,"size":50}}`, 42.5},
+		// 「可用」维度：若真实探测响应同时给出总数与可用额，用能真正花出去的
+		// available 判 reserve_credits（见 creditValueKeys 注释）。
+		{"data.available", `{"code":0,"data":{"available":20}}`, 20},
+		{"available 优先于 totalRemaining", `{"data":{"totalRemaining":100,"available":30}}`, 30},
+		{"只有 totalRemaining 时回落", `{"data":{"totalRemaining":100}}`, 100},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -944,6 +1184,38 @@ func TestProbeCreditsSuccessFieldVariants(t *testing.T) {
 				t.Fatalf("积分缓存 TTL = %v, want %v", ttl, creditsCacheTTL)
 			}
 		})
+	}
+}
+
+// TestProbeCreditsAvailableDrivesReserveDecision 把「可用值」语义接到判定上：
+// 上游单值形状下解析结果就是该渠道可用的积分；若响应同时给出总数与可用额，
+// 用可用额判定 reserve_credits —— 用含不可用份额的总数会误放行已耗尽的渠道。
+func TestProbeCreditsAvailableDrivesReserveDecision(t *testing.T) {
+	srv := probeServer(t, http.StatusOK,
+		`{"code":0,"data":{"totalRemaining":100,"available":30}}`, "super-secret")
+	defer srv.Close()
+
+	db := &fakeDB{}
+	rt := newProbeRuntime(t, srv, db, newFakeCounter(func() time.Time { return stateTestNow }))
+	got, err := rt.ProbeCredits(context.Background(), srv.Client(), stateTestProvider(), probeToken())
+	if err != nil {
+		t.Fatalf("ProbeCredits = %v", err)
+	}
+	if got != 30 {
+		t.Fatalf("credits = %v, want 可用值 30（而非总数 100）", got)
+	}
+	if len(db.credits) != 1 || db.credits[0].credits != 30 {
+		t.Fatalf("落库积分 = %+v, want 30", db.credits)
+	}
+
+	observed := stateTestNow.Add(-time.Minute)
+	state := &model.WorkbuddyChannelState{Credits: got, CreditsAt: observed}
+	// 可用 30 <= 保留 50 → 拦（若误用总数 100 会放行）。
+	if pe := parkedOf(t, admitDecision(&model.WorkbuddySetting{Enabled: true, ReserveCredits: 50}, state, "m", stateTestNow, nil)); pe.Reason != reasonReserveCredits {
+		t.Fatalf("可用 30 应触发 reserve_credits, got reason=%q", pe.Reason)
+	}
+	if err := admitDecision(&model.WorkbuddySetting{Enabled: true, ReserveCredits: 10}, state, "m", stateTestNow, nil); err != nil {
+		t.Fatalf("可用 30 高于保留 10 应放行, got %v", err)
 	}
 }
 

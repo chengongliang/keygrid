@@ -49,6 +49,18 @@ const (
 	defaultCooldown = 60 * time.Second
 	maxCooldown     = time.Hour
 
+	// riskCooldown 风控限制（HTTP 403 + code 11140）的账号冷却：固定 2h。
+	// 对齐参考实现 wb_proxy.RESTRICTED_403_COOLDOWN = 7200.0（commit be4f9f8 /
+	// PR #288）：限制按小时计，2h 后自然重试，上游解封即自愈。
+	// 刻意不受 maxCooldown（1h）裁剪，也不采信 Retry-After：1h 上限是为上游
+	// 随手给的超长退避设的防御值，而 2h 是「这个账号已被限制」的策略时长；
+	// 采信 403 的 Retry-After 反而可能把冷却压得比策略意图更短。
+	riskCooldown = 2 * time.Hour
+
+	// allModelsGlob 渠道级冷却的通配键：风控限制是账号级的坏，与具体模型无关，
+	// 被限制的账号换任何模型都还是被限制（参考实现给账号而不是给 model 上冷却）。
+	allModelsGlob = "*"
+
 	// 积分缓存 15min（设计 §2.4 Redis 键表）；主动探测 30s 超时。
 	creditsCacheTTL     = 15 * time.Minute
 	creditsProbeTimeout = 30 * time.Second
@@ -63,6 +75,14 @@ const (
 
 	// upstreamCodeDailyLimit 上游业务码：当日限额（设计 §3.7 错误码分类）。
 	upstreamCodeDailyLimit = 6004
+
+	// upstreamCodeAccountRestricted 上游业务码：风控限制（HTTP 403 + code 11140，
+	// msg "request illegal"，displayMsg「账号存在异常行为，已被限制使用」）。
+	// 参考实现 wb_proxy.restriction_is_account_level()（commit be4f9f8 / PR #288）
+	// 用正则匹配 `"code"\s*:\s*"?11140"?` 以避开 requestId 里的子串；我们直接解析
+	// JSON 的 code 字段（relay/upstreamCodeFromError），本来就是精确字段匹配，
+	// 不存在子串误命中，所以只认 code，不额外猜正文措辞。
+	upstreamCodeAccountRestricted = 11140
 )
 
 // probeCreditsBody 积分查询请求体（逐个字段照抄参考实现，不可改）。
@@ -265,8 +285,10 @@ func (r *Runtime) Admit(p *model.Provider, upModel string) error {
 	defer cancel()
 
 	// 4. 模型级冷却：Redis 优先，miss/无 Redis 回落到运行态 map。
+	//    账号级风控冷却（allModelsGlob 通配键）与模型级冷却取较晚者：风控限制是
+	//    账号的坏，对全部模型生效，不能被同期一条更短的模型冷却「盖短」。
 	effective := state
-	if until, ok := resolveCooldown(ctx, r.counters(), r.prefix(), p.ID, upModel, state); ok {
+	if until, ok := mergeCooldownUntil(ctx, r.counters(), r.prefix(), p.ID, upModel, state); ok {
 		effective = withCooldown(state, upModel, until)
 	}
 
@@ -348,7 +370,22 @@ func (r *Runtime) Observe(ev Event) {
 		r.observeSuccess(cs, p, ev, now)
 	case ev.Status == http.StatusTooManyRequests || ev.UpCode == upstreamCodeDailyLimit:
 		r.observeCooldown(cs, p, ev, now)
+	case isRiskControl(ev):
+		// 上游风控限制 403（code 11140）：冷却整条渠道并换号（原因见 isRiskControl）。
+		r.observeCooldown(cs, p, ev, now)
 	}
+}
+
+// isRiskControl 判定一次 403 是否是「账号被风控限制」而不是「内容审核」。
+//
+// 参考实现 wb_proxy.py restriction_is_account_level()（commit be4f9f8 / PR #288）：
+// 403 + code 11140 是账号级限制（实测正文 msg "request illegal"、displayMsg
+// 「账号存在异常行为，已被限制使用」），必须与内容审核 403 分流 —— 对被限制的
+// 账号降级提示词没有意义，只会上一个被限制的账号把对话一次次打死。
+// 我们只认 code 11140：内容审核 403（如 10001）与其它未知 403 都保持原有行为
+// （照常 failover 换号，但不给账号上长冷却）。
+func isRiskControl(ev Event) bool {
+	return ev.Status == http.StatusForbidden && ev.UpCode == upstreamCodeAccountRestricted
 }
 
 // observeSuccess 成功分支：清冷却、写 last_ok_at、累加当日 token。
@@ -401,7 +438,10 @@ func (r *Runtime) observeSuccess(cs counterStore, p *model.Provider, ev Event, n
 	}
 }
 
-// observeCooldown 429 / 6004 分支：写模型级冷却（Redis TTL + Postgres map）。
+// observeCooldown 429 / 6004 / 风控 403(11140) 分支：写冷却（Redis TTL + Postgres map）。
+//
+// 风控限制是账号级的坏：写 allModelsGlob 通配键冷却整条渠道，而不是只停当前模型 ——
+// 被限制的账号换模型也还是被限制。
 func (r *Runtime) observeCooldown(cs counterStore, p *model.Provider, ev Event, now time.Time) {
 	ctx, cancel := context.WithTimeout(context.Background(), redisOpTimeout)
 	defer cancel()
@@ -409,10 +449,14 @@ func (r *Runtime) observeCooldown(cs counterStore, p *model.Provider, ev Event, 
 
 	cooldown := cooldownFor(ev)
 	until := now.Add(cooldown)
+	keyModel := ev.UpModel
+	if isRiskControl(ev) {
+		keyModel = allModelsGlob
+	}
 
 	// Redis 先写：即使 Postgres 读失败，热路径也应立刻生效。
 	if cs != nil {
-		cs.Set(ctx, cooldownKey(prefix, p.ID, ev.UpModel),
+		cs.Set(ctx, cooldownKey(prefix, p.ID, keyModel),
 			until.UTC().Format(time.RFC3339Nano), cooldown)
 	}
 
@@ -429,15 +473,34 @@ func (r *Runtime) observeCooldown(cs counterStore, p *model.Provider, ev Event, 
 		state = &model.WorkbuddyChannelState{UserID: p.UserID, ProviderID: p.ID}
 	}
 	// 写前清理过期项，避免 jsonb 列无限增长。
-	applyCooldown(state, ev.UpModel, until, now)
+	applyCooldown(state, keyModel, until, now)
 	state.UpdatedAt = now
 	if err := db.UpsertWorkbuddyChannelState(state); err != nil {
 		log.Printf("[workbuddy] cooldown write failed provider=%d: %v", p.ID, err)
 	}
 }
 
-// cooldownFor 计算冷却时长：Retry-After（>0）否则默认 60s，并防御性封顶 1h。
+// cooldownFor 计算冷却时长：风控 403(11140) 固定 2h；否则 Retry-After（>0）
+// 否则默认 60s，并防御性封顶 1h。
+//
+// 与 1h 上限的交互（明确说明）：riskCooldown(2h) 是账号被限制的策略时长，刻意
+// 绕过 maxCooldown；maxCooldown 只在 Retry-After 分支生效（防上游给超长退避）。
+//
+// 429 的账号级/模型级分流（参考实现 wb_accounts.py:414-450、wb_proxy.py:11531）：
+// 参考实现只在「正文本身声明是凭证级」（ACCOUNT_SCOPE_PHRASES，wb_proxy.py:11190）
+// 时才给账号 600s→2h 的软限阶梯（SOFT_RATE_BASE）；正文没有重置时钟又没有作用
+// 域措辞时，窗口只落在当前模型上、从 60s 起（SOFT_RATE_UNVERIFIED_BASE）——
+// 参考实现在 rate_limit_is_account_level 的 docstring（wb_proxy.py:11263-11281）
+// 里写明：把「没有时钟」当成账号级，会让最常见的裸 429 把一整个 realm 的账号
+// 同时冷却，是它专门修掉的故障。我们的 Event 只带 Status/UpCode/RetryAfter，
+// 拿不到正文作用域；与其猜（列表本身也是 provisional、尚未采集到真实账号级
+// 429 正文），不如保持与参考实现的模型级默认一致：带 Retry-After 用它（封顶
+// 1h），不带就是 60s 模型级。要上 600s 账号级阶梯，得先让 Event 携带正文作用域
+// 证据（一次性接线决定），不在本次猜测式实现。
 func cooldownFor(ev Event) time.Duration {
+	if isRiskControl(ev) {
+		return riskCooldown
+	}
 	d := ev.RetryAfter
 	if d <= 0 {
 		d = defaultCooldown
@@ -578,6 +641,21 @@ func resolveCooldown(ctx context.Context, cs counterStore, prefix string, provid
 	return time.Time{}, false
 }
 
+// mergeCooldownUntil 取「渠道级风控冷却」与「模型级冷却」中较晚的截止时间。
+//
+// 渠道级冷却用 allModelsGlob 通配键（风控 403/11140 时由 observeCooldown 写入）；
+// 两者都缺席时返回 ok=false，Admit 不构造副本（保持原判定路径）。
+func mergeCooldownUntil(ctx context.Context, cs counterStore, prefix string, providerID int64, upModel string, state *model.WorkbuddyChannelState) (time.Time, bool) {
+	var until time.Time
+	ok := false
+	for _, model := range []string{allModelsGlob, upModel} {
+		if t, found := resolveCooldown(ctx, cs, prefix, providerID, model, state); found && t.After(until) {
+			until, ok = t, true
+		}
+	}
+	return until, ok
+}
+
 // withCooldown 返回运行态副本（不改原对象），把某个模型的冷却解析结果合并进 map。
 func withCooldown(state *model.WorkbuddyChannelState, upModel string, until time.Time) *model.WorkbuddyChannelState {
 	if state == nil {
@@ -704,8 +782,21 @@ func nextLocalDayStart(t time.Time) time.Time { return localDayStart(t).AddDate(
 // ---- 积分响应解析 ----
 
 // creditValueKeys 积分候选字段（优先级从高到低，大小写不敏感）。
+//
+// 上游（commit 51549a3 / PR #286）的「总剩余 / 可用」两个维度并不是两套 JSON
+// 键：商业版把 get-user-resource 响应里每个积分包的剩余求和得到唯一的
+// credits["remain"]（wb_accounts.py:1567 解析 CycleCapacityRemain*，
+// wb_accounts.py:1792 汇总 tot_remain 并写入 self.credits）；看板上的「可用」只是
+// 在前端对 account.credits.remain 做「启用且未触发限额护栏的账号」子集求和
+// （dashboard.html updateUI，51549a3）。所以在单渠道粒度上「总剩余」与
+// 「可用」本就是同一个数，reserve_credits 用这个数判定即已是可用语义。
+//
+// 候选顺序把 available 放在 totalRemaining 之前是防御性的：万一真实探测响应
+// 同时给出「总剩余」与「可用」，我们要用能真正花出去的那个（available）来判定
+// reserve_credits，而不是把含冻结/不可用份额的总数当成可用额；只有 totalRemaining
+// 时行为不变。
 var creditValueKeys = []string{
-	"remaining", "remain", "balance", "credits", "totalRemaining", "available", "left",
+	"available", "remaining", "remain", "balance", "credits", "left", "totalRemaining",
 }
 
 // parseCredits 从响应体里提取积分余额。
