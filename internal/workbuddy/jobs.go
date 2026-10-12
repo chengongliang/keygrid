@@ -254,8 +254,28 @@ func (jc *JobContext) httpClient() *http.Client {
 	if jc != nil && jc.Client != nil {
 		return jc.Client
 	}
+	// 框架级兜底：勾了出口代理的渠道绝不允许回落到 DefaultClient。
+	// DefaultClient 既没代理也没超时，等于静默直连 —— 真实 IP 泄漏到上游，
+	// 与「聊天与任务同出口」的前提相悖（上游 a94eb84 修的正是这类代理丢失）。
+	// 生产路径一定会注入 jobHTTPClient 构建的客户端（缺代理时任务直接失败），
+	// 这里返回一个恒定报错的 client，让漏注入变成明确的失败而不是静默直连。
+	if jc != nil && jc.Provider != nil && jc.Provider.UseProxy {
+		return errNoProxyClient
+	}
 	return http.DefaultClient
 }
+
+// errNoProxyClient 勾了代理但没拿到代理客户端时的占位 client：任何请求都失败。
+var errNoProxyClient = &http.Client{
+	Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("channel requires proxy, but no proxy client was injected")
+	}),
+}
+
+// roundTripFunc 让普通函数满足 http.RoundTripper（仅用于上面的占位 client）。
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 // RunResult 一次执行的结果（回传前端与写审计）。
 type RunResult struct {

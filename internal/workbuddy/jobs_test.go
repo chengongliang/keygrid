@@ -944,3 +944,20 @@ func (s *retryMetaStore) UpdateWorkbuddyMeta(userID, providerID int64, key strin
 	s.statesByProvider[providerID] = st
 	return nil
 }
+
+// TestHTTPClientNeverBypassesProxy 框架级不变量：渠道勾了出口代理但没有注入
+// 代理客户端时，绝不允许回落到 DefaultClient（那等于静默直连、泄漏真实 IP）。
+func TestHTTPClientNeverBypassesProxy(t *testing.T) {
+	direct := &JobContext{Provider: &model.Provider{UseProxy: false}}
+	if direct.httpClient() != http.DefaultClient {
+		t.Fatal("未勾代理应回落到 DefaultClient")
+	}
+	proxied := &JobContext{Provider: &model.Provider{UseProxy: true}}
+	c := proxied.httpClient()
+	if c == http.DefaultClient {
+		t.Fatal("勾了代理不允许回落到 DefaultClient")
+	}
+	if _, err := c.Get("http://example.invalid/"); err == nil {
+		t.Fatal("占位 client 必须恒定失败")
+	}
+}
