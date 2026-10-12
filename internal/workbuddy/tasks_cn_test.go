@@ -14,6 +14,7 @@ package workbuddy
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -189,17 +190,31 @@ func TestGrowthHappyPathSequence(t *testing.T) {
 	srv, rec := newCNServer(t, func(q cnReq) (int, string) {
 		switch {
 		case q.Method == http.MethodGet && q.Path == growthTasksPath:
-			if getCount.Add(1) == 1 {
+			switch getCount.Add(1) {
+			case 1:
+				// 初始：两个任务都未接取。
 				return 200, `{"code":0,"data":{"tasks":[
-					{"task_code":"expert_5","title":"使用专家助手","accept_status":"not_accepted","progress":{"current":0,"target":5}},
+					{"task_code":"Expert_team_use_3","title":"使用专家团队","accept_status":"not_accepted","progress":{"current":0,"target":3}},
 					{"task_code":"skill_1","title":"体验技能","accept_status":"not_accepted","progress":{"current":0,"target":1}}]}}`
+			case 2:
+				// 接取后复核：都已接取，进度仍为 0。
+				return 200, `{"code":0,"data":{"tasks":[
+					{"task_code":"Expert_team_use_3","accept_status":"accepted","progress":{"current":0,"target":3}},
+					{"task_code":"skill_1","accept_status":"accepted","progress":{"current":0,"target":1}}]}}`
+			case 3:
+				// team 轮询：上报后进度达标。
+				return 200, `{"code":0,"data":{"tasks":[
+					{"task_code":"Expert_team_use_3","accept_status":"completed","progress":{"current":3,"target":3}},
+					{"task_code":"skill_1","accept_status":"accepted","progress":{"current":0,"target":1}}]}}`
+			default:
+				// skill 轮询：达标。
+				return 200, `{"code":0,"data":{"tasks":[
+					{"task_code":"Expert_team_use_3","accept_status":"completed","progress":{"current":3,"target":3}},
+					{"task_code":"skill_1","accept_status":"completed","progress":{"current":1,"target":1}}]}}`
 			}
-			return 200, `{"code":0,"data":{"tasks":[
-				{"task_code":"expert_5","accept_status":"completed","progress":{"current":5,"target":5}},
-				{"task_code":"skill_1","accept_status":"completed","progress":{"current":1,"target":1}}]}}`
 		case q.Method == http.MethodPost && q.Path == growthAcceptPath:
 			return 200, `{"code":0,"data":{"results":[
-				{"task_code":"expert_5","status":"accepted"},
+				{"task_code":"Expert_team_use_3","status":"accepted"},
 				{"task_code":"skill_1","status":"accepted"}]}}`
 		case q.Method == http.MethodPost && q.Path == reportPath:
 			return 200, `{"code":0}`
@@ -228,9 +243,10 @@ func TestGrowthHappyPathSequence(t *testing.T) {
 	want := []string{
 		"GET " + growthTasksPath,
 		"POST " + growthAcceptPath,
+		"GET " + growthTasksPath,
 		"POST " + reportPath,
 		"GET " + growthTasksPath,
-		"POST /activity/growth/tasks/expert_5/claim",
+		"POST /activity/growth/tasks/Expert_team_use_3/claim",
 		"POST " + reportPath,
 		"GET " + growthTasksPath,
 		"POST /activity/growth/tasks/skill_1/claim",
@@ -246,17 +262,17 @@ func TestGrowthHappyPathSequence(t *testing.T) {
 	if err := json.Unmarshal([]byte(reqs[1].Body), &acc); err != nil {
 		t.Fatalf("accept body: %v", err)
 	}
-	if len(acc.TaskCodes) != 2 || acc.TaskCodes[0] != "expert_5" || acc.TaskCodes[1] != "skill_1" {
+	if len(acc.TaskCodes) != 2 || acc.TaskCodes[0] != "Expert_team_use_3" || acc.TaskCodes[1] != "skill_1" {
 		t.Fatalf("accept 任务码错误: %v", acc.TaskCodes)
 	}
 
-	// 批内 (eventCode,id) 互异（expert_5 批 5 个 id）。
+	// team 任务 target=3，应一次上报 3 个互异 id 的 expert 事件。
 	var firstReport []map[string]any
-	if err := json.Unmarshal([]byte(reqs[2].Body), &firstReport); err != nil {
+	if err := json.Unmarshal([]byte(reqs[3].Body), &firstReport); err != nil {
 		t.Fatalf("report body: %v", err)
 	}
-	if len(firstReport) != 5 {
-		t.Fatalf("expert_5 应上报 5 个事件, got %d", len(firstReport))
+	if len(firstReport) != 3 {
+		t.Fatalf("Expert_team_use_3 应上报 3 个事件, got %d", len(firstReport))
 	}
 	seen := map[string]bool{}
 	for _, ev := range firstReport {
@@ -275,7 +291,7 @@ func TestGrowthHappyPathSequence(t *testing.T) {
 
 	// skill_1 批 1 个事件。
 	var secondReport []map[string]any
-	if err := json.Unmarshal([]byte(reqs[5].Body), &secondReport); err != nil {
+	if err := json.Unmarshal([]byte(reqs[6].Body), &secondReport); err != nil {
 		t.Fatalf("report body: %v", err)
 	}
 	if len(secondReport) != 1 || secondReport[0]["eventCode"] != "skill_info" {
@@ -287,6 +303,10 @@ func TestGrowthHappyPathSequence(t *testing.T) {
 	}
 	if !strings.Contains(msg, "上报=2") || !strings.Contains(msg, "领奖=2") {
 		t.Fatalf("摘要计数错误: %q", msg)
+	}
+	// 接取后复核会重列清单，因此应有 4 次 GET（初始 / 复核 / 2 次轮询）。
+	if getCount.Load() != 4 {
+		t.Fatalf("GET 次数 = %d, want 4", getCount.Load())
 	}
 }
 
@@ -719,5 +739,568 @@ func TestGrowthClaimRejectedNoBodyLeak(t *testing.T) {
 	assertNoLeak(t, msg)
 	if !strings.Contains(msg, "task not completed") {
 		t.Fatalf("应保留结构化上游 msg: %q", msg)
+	}
+}
+
+// ---- 新增：上游 v1.7 行为对齐 ----
+
+// cnCountPath 统计某路径的请求数。
+func cnCountPath(reqs []cnReq, path string) int {
+	n := 0
+	for _, q := range reqs {
+		if q.Path == path {
+			n++
+		}
+	}
+	return n
+}
+
+// cnTestJWT 构造仅用于只读判定的未签名 JWT（payload 段 base64url）。
+func cnTestJWT(payload string) string {
+	return "h." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".sig"
+}
+
+// TestGrowthAutoProcessedBeforeAccept 钉住 wb_tasks.py:650-697 的顺序：
+// auto 任务（first_buddy）先点亮领奖，再批量接取非 auto 未接任务。
+func TestGrowthAutoProcessedBeforeAccept(t *testing.T) {
+	stubSleep(t)
+	store := newFakeCNStore()
+	state := &model.WorkbuddyChannelState{UserID: 10, ProviderID: 101, Meta: map[string]any{}}
+	store.statesByProvider[101] = state
+
+	var getCount atomic.Int64
+	srv, rec := newCNServer(t, func(q cnReq) (int, string) {
+		switch {
+		case q.Method == http.MethodGet && q.Path == growthTasksPath:
+			switch getCount.Add(1) {
+			case 1:
+				return 200, `{"code":0,"data":{"tasks":[
+					{"task_code":"first_buddy","task_type":"auto","accept_status":"not_accepted","progress":{"current":0,"target":1}},
+					{"task_code":"expert_5","accept_status":"not_accepted","progress":{"current":0,"target":1}}]}}`
+			case 2:
+				return 200, `{"code":0,"data":{"tasks":[
+					{"task_code":"first_buddy","task_type":"auto","accept_status":"completed","progress":{"current":1,"target":1}},
+					{"task_code":"expert_5","accept_status":"not_accepted","progress":{"current":0,"target":1}}]}}`
+			case 3:
+				return 200, `{"code":0,"data":{"tasks":[
+					{"task_code":"first_buddy","task_type":"auto","accept_status":"completed","progress":{"current":1,"target":1}},
+					{"task_code":"expert_5","accept_status":"accepted","progress":{"current":0,"target":1}}]}}`
+			default:
+				return 200, `{"code":0,"data":{"tasks":[
+					{"task_code":"first_buddy","task_type":"auto","accept_status":"completed","progress":{"current":1,"target":1}},
+					{"task_code":"expert_5","accept_status":"completed","progress":{"current":1,"target":1}}]}}`
+			}
+		case q.Method == http.MethodPost && q.Path == growthAcceptPath:
+			return 200, `{"code":0,"data":{"results":[{"task_code":"expert_5","status":"accepted"}]}}`
+		case q.Method == http.MethodPost && q.Path == reportPath:
+			return 200, `{"code":0}`
+		case q.Method == http.MethodPost && strings.HasSuffix(q.Path, "/claim"):
+			return 200, `{"code":0,"data":{"credit":1}}`
+		}
+		t.Errorf("未预期请求: %s %s", q.Method, q.Path)
+		return 404, `{}`
+	})
+	stubCNBases(t, srv.URL, srv.URL)
+
+	r := newCNRuntime(store, testJobsNow)
+	p := cnProvider(101, 10)
+	status, msg := runGrowthJob(context.Background(), cnJobContext(r, &p, state, testJobsNow))
+	if status != jobStatusOK {
+		t.Fatalf("status=%q msg=%q", status, msg)
+	}
+
+	reqs := rec.snapshot()
+	firstReport, acceptAt := -1, -1
+	for i, q := range reqs {
+		if q.Path == reportPath && firstReport < 0 {
+			firstReport = i
+		}
+		if q.Path == growthAcceptPath && acceptAt < 0 {
+			acceptAt = i
+		}
+	}
+	if firstReport < 0 || acceptAt < 0 {
+		t.Fatalf("缺少 report/accept 请求: %+v", reqs)
+	}
+	if firstReport > acceptAt {
+		t.Fatalf("auto 任务应先于接取点亮: firstReport=%d accept=%d", firstReport, acceptAt)
+	}
+	var acc struct {
+		TaskCodes []string `json:"task_codes"`
+	}
+	if err := json.Unmarshal([]byte(reqs[acceptAt].Body), &acc); err != nil {
+		t.Fatalf("accept body: %v", err)
+	}
+	if len(acc.TaskCodes) != 1 || acc.TaskCodes[0] != "expert_5" {
+		t.Fatalf("accept 应只含 expert_5（auto 不接取）: %v", acc.TaskCodes)
+	}
+	var evs []map[string]any
+	if err := json.Unmarshal([]byte(reqs[firstReport].Body), &evs); err != nil {
+		t.Fatalf("report body: %v", err)
+	}
+	if len(evs) != 1 || evs[0]["eventCode"] != "chat_request_send" {
+		t.Fatalf("first_buddy 事件错误: %+v", evs)
+	}
+	if !strings.Contains(msg, "领奖=2") {
+		t.Fatalf("auto 与 single 都应领奖: %q", msg)
+	}
+}
+
+// TestGrowthProgressPoll 钉住 wb_tasks.py:579-620：
+// target=3 上报 3 次，进度轮询达标才领奖；6 次轮询仍未达标则顺延不领奖。
+func TestGrowthProgressPoll(t *testing.T) {
+	t.Run("target=3 上报3次且达标后领奖", func(t *testing.T) {
+		stubSleep(t)
+		store := newFakeCNStore()
+		var getCount atomic.Int64
+		srv, rec := newCNServer(t, func(q cnReq) (int, string) {
+			switch {
+			case q.Method == http.MethodGet && q.Path == growthTasksPath:
+				switch getCount.Add(1) {
+				case 1:
+					return 200, `{"code":0,"data":{"tasks":[{"task_code":"expert_5","accept_status":"accepted","progress":{"current":0,"target":3}}]}}`
+				case 2:
+					return 200, `{"code":0,"data":{"tasks":[{"task_code":"expert_5","accept_status":"accepted","progress":{"current":1,"target":3}}]}}`
+				case 3:
+					return 200, `{"code":0,"data":{"tasks":[{"task_code":"expert_5","accept_status":"accepted","progress":{"current":2,"target":3}}]}}`
+				default:
+					return 200, `{"code":0,"data":{"tasks":[{"task_code":"expert_5","accept_status":"completed","progress":{"current":3,"target":3}}]}}`
+				}
+			case q.Method == http.MethodPost && q.Path == reportPath:
+				return 200, `{"code":0}`
+			case q.Method == http.MethodPost && strings.HasSuffix(q.Path, "/claim"):
+				return 200, `{"code":0,"data":{"credit":1}}`
+			}
+			return 404, `{}`
+		})
+		stubCNBases(t, srv.URL, srv.URL)
+
+		r := newCNRuntime(store, testJobsNow)
+		p := cnProvider(101, 10)
+		status, msg := runGrowthJob(context.Background(), cnJobContext(r, &p, nil, testJobsNow))
+		if status != jobStatusOK {
+			t.Fatalf("status=%q msg=%q", status, msg)
+		}
+		reqs := rec.snapshot()
+		var evs []map[string]any
+		for _, q := range reqs {
+			if q.Path == reportPath {
+				if err := json.Unmarshal([]byte(q.Body), &evs); err != nil {
+					t.Fatalf("report body: %v", err)
+				}
+			}
+		}
+		if len(evs) != 3 {
+			t.Fatalf("target=3 应上报 3 次事件, got %d", len(evs))
+		}
+		if got := cnCountPath(reqs, "/activity/growth/tasks/expert_5/claim"); got != 1 {
+			t.Fatalf("达标后应领奖 1 次, got %d", got)
+		}
+		if !strings.Contains(msg, "上报=1") || !strings.Contains(msg, "领奖=1") {
+			t.Fatalf("摘要计数错误: %q", msg)
+		}
+	})
+
+	t.Run("6 次轮询仍未达标则顺延不领奖", func(t *testing.T) {
+		stubSleep(t)
+		store := newFakeCNStore()
+		var getCount atomic.Int64
+		srv, rec := newCNServer(t, func(q cnReq) (int, string) {
+			switch {
+			case q.Method == http.MethodGet && q.Path == growthTasksPath:
+				n := int(getCount.Add(1))
+				if n == 1 {
+					return 200, `{"code":0,"data":{"tasks":[{"task_code":"expert_5","accept_status":"accepted","progress":{"current":0,"target":10}}]}}`
+				}
+				return 200, fmt.Sprintf(`{"code":0,"data":{"tasks":[{"task_code":"expert_5","accept_status":"accepted","progress":{"current":%d,"target":10}}]}}`, n-1)
+			case q.Method == http.MethodPost && q.Path == reportPath:
+				return 200, `{"code":0}`
+			case q.Method == http.MethodPost && strings.HasSuffix(q.Path, "/claim"):
+				t.Errorf("进度未达标不应领奖")
+				return 200, `{"code":0}`
+			}
+			return 404, `{}`
+		})
+		stubCNBases(t, srv.URL, srv.URL)
+
+		r := newCNRuntime(store, testJobsNow)
+		p := cnProvider(101, 10)
+		status, msg := runGrowthJob(context.Background(), cnJobContext(r, &p, nil, testJobsNow))
+		if status != jobStatusOK {
+			t.Fatalf("status=%q msg=%q", status, msg)
+		}
+		reqs := rec.snapshot()
+		if got := cnCountPath(reqs, "/activity/growth/tasks/expert_5/claim"); got != 0 {
+			t.Fatalf("进度未达标不应领奖, got %d", got)
+		}
+		// 初始 1 次 + 6 次轮询 = 7 次 GET。
+		if getCount.Load() != 7 {
+			t.Fatalf("应轮询 6 次（共 7 次 GET）, got %d", getCount.Load())
+		}
+		if !strings.Contains(msg, "上报=1") || !strings.Contains(msg, "领奖=0") {
+			t.Fatalf("摘要计数错误: %q", msg)
+		}
+	})
+}
+
+// TestGrowthAcceptReasonsSurfaced 钉住 wb_tasks.py:214/235/248/261：
+// 接取失败原因进入汇总 Message，且只保留结构化上游 msg（不泄漏正文）。
+func TestGrowthAcceptReasonsSurfaced(t *testing.T) {
+	stubSleep(t)
+	store := newFakeCNStore()
+	state := &model.WorkbuddyChannelState{UserID: 10, ProviderID: 101, Meta: map[string]any{}}
+	store.statesByProvider[101] = state
+
+	srv, _ := newCNServer(t, func(q cnReq) (int, string) {
+		switch {
+		case q.Method == http.MethodGet && q.Path == growthTasksPath:
+			return 200, `{"code":0,"data":{"tasks":[
+				{"task_code":"expert_5","accept_status":"not_accepted","progress":{"current":0,"target":1}}]}}`
+		case q.Method == http.MethodPost && q.Path == growthAcceptPath:
+			return 200, `{"code":400,"msg":"task not completed","echo":"super-secret"}`
+		}
+		return 404, `{}`
+	})
+	stubCNBases(t, srv.URL, srv.URL)
+
+	r := newCNRuntime(store, testJobsNow)
+	p := cnProvider(101, 10)
+	status, msg := runGrowthJob(context.Background(), cnJobContext(r, &p, state, testJobsNow))
+	if status != jobStatusOK {
+		t.Fatalf("接取失败但任务被跳过，按参考实现整体 ok: status=%q msg=%q", status, msg)
+	}
+	if !strings.Contains(msg, "接取原因") {
+		t.Fatalf("应汇总接取原因: %q", msg)
+	}
+	if !strings.Contains(msg, "task not completed") {
+		t.Fatalf("应保留结构化上游 msg: %q", msg)
+	}
+	assertNoLeak(t, msg)
+}
+
+// TestFirstBuddySpecAndEnsureBuddy 钉住 wb_tasks.py:54-56/419-434：
+// first_buddy 规格变更为 chat/300/领取一只 Buddy，ensure_buddy 完成并领取后为 true。
+func TestFirstBuddySpecAndEnsureBuddy(t *testing.T) {
+	spec, ok := growthTaskSpecs["first_buddy"]
+	if !ok || spec.Kind != "chat" || spec.Reward != 300 || spec.Name != "领取一只 Buddy" {
+		t.Fatalf("first_buddy 规格未对齐: %+v", spec)
+	}
+
+	t.Run("ensureBuddy 完成并领取后返回 true", func(t *testing.T) {
+		stubSleep(t)
+		store := newFakeCNStore()
+		state := &model.WorkbuddyChannelState{UserID: 10, ProviderID: 101, Meta: map[string]any{}}
+		store.statesByProvider[101] = state
+		var getCount atomic.Int64
+		srv, rec := newCNServer(t, func(q cnReq) (int, string) {
+			switch {
+			case q.Method == http.MethodGet && q.Path == growthTasksPath:
+				switch getCount.Add(1) {
+				case 1:
+					return 200, `{"code":0,"data":{"tasks":[{"task_code":"first_buddy","task_type":"auto","accept_status":"not_accepted","progress":{"current":0,"target":1}}]}}`
+				case 2:
+					return 200, `{"code":0,"data":{"tasks":[{"task_code":"first_buddy","task_type":"auto","accept_status":"completed","progress":{"current":1,"target":1}}]}}`
+				default:
+					return 200, `{"code":0,"data":{"tasks":[{"task_code":"first_buddy","task_type":"auto","accept_status":"claimed","progress":{"current":1,"target":1}}]}}`
+				}
+			case q.Method == http.MethodPost && q.Path == reportPath:
+				return 200, `{"code":0}`
+			case q.Method == http.MethodPost && q.Path == "/activity/growth/tasks/first_buddy/claim":
+				return 200, `{"code":0,"data":{"credit":300}}`
+			}
+			return 404, `{}`
+		})
+		stubCNBases(t, srv.URL, srv.URL)
+
+		r := newCNRuntime(store, testJobsNow)
+		p := cnProvider(101, 10)
+		g, err := newGrowthRunner(context.Background(), cnJobContext(r, &p, state, testJobsNow), RealmCN)
+		if err != nil {
+			t.Fatalf("newGrowthRunner: %v", err)
+		}
+		if !g.ensureBuddy() {
+			t.Fatal("ensureBuddy 应返回 true")
+		}
+		reqs := rec.snapshot()
+		if cnCountPath(reqs, "/activity/growth/tasks/first_buddy/claim") != 1 {
+			t.Fatalf("first_buddy 应领奖 1 次: %+v", reqs)
+		}
+		found := false
+		for _, q := range reqs {
+			if q.Path == reportPath && strings.Contains(q.Body, "chat_request_send") {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("ensureBuddy 应上报 chat 事件")
+		}
+	})
+
+	t.Run("清单缺少 first_buddy 返回 false", func(t *testing.T) {
+		stubSleep(t)
+		store := newFakeCNStore()
+		srv, _ := newCNServer(t, func(q cnReq) (int, string) {
+			if q.Method == http.MethodGet && q.Path == growthTasksPath {
+				return 200, `{"code":0,"data":{"tasks":[]}}`
+			}
+			return 404, `{}`
+		})
+		stubCNBases(t, srv.URL, srv.URL)
+		r := newCNRuntime(store, testJobsNow)
+		p := cnProvider(101, 10)
+		g, err := newGrowthRunner(context.Background(), cnJobContext(r, &p, nil, testJobsNow), RealmCN)
+		if err != nil {
+			t.Fatalf("newGrowthRunner: %v", err)
+		}
+		if g.ensureBuddy() {
+			t.Fatal("缺少 first_buddy 应返回 false")
+		}
+	})
+}
+
+// TestCatDepartRetryAfterNoActiveBuddy 钉住 wb_tasks.py:504-513：
+// depart 报 "no active buddy" 时先补 first_buddy 再重试一次；补不上则给出清晰失败。
+func TestCatDepartRetryAfterNoActiveBuddy(t *testing.T) {
+	t.Run("补 first_buddy 后重试成功", func(t *testing.T) {
+		stubSleep(t)
+		store := newFakeCNStore()
+		state := &model.WorkbuddyChannelState{UserID: 10, ProviderID: 101, Meta: map[string]any{}}
+		store.statesByProvider[101] = state
+		var departs, taskGets atomic.Int64
+		srv, rec := newCNServer(t, func(q cnReq) (int, string) {
+			switch {
+			case q.Method == http.MethodGet && q.Path == travelStatusPath:
+				return 200, `{"code":0,"data":{"state":"idle","daily_limit_reached":false}}`
+			case q.Method == http.MethodGet && q.Path == travelConfigPath:
+				return 200, `{"code":0,"data":{"locations":[{"id":7,"name":"巴黎"}]}}`
+			case q.Method == http.MethodPost && q.Path == travelDepartPath:
+				if departs.Add(1) == 1 {
+					return 200, `{"code":4001,"msg":"no active buddy"}`
+				}
+				return 200, `{"code":0,"data":{"location":{"name":"巴黎"}}}`
+			case q.Method == http.MethodGet && q.Path == growthTasksPath:
+				switch taskGets.Add(1) {
+				case 1:
+					return 200, `{"code":0,"data":{"tasks":[{"task_code":"first_buddy","task_type":"auto","accept_status":"not_accepted","progress":{"current":0,"target":1}}]}}`
+				case 2:
+					return 200, `{"code":0,"data":{"tasks":[{"task_code":"first_buddy","task_type":"auto","accept_status":"completed","progress":{"current":1,"target":1}}]}}`
+				default:
+					return 200, `{"code":0,"data":{"tasks":[{"task_code":"first_buddy","task_type":"auto","accept_status":"claimed","progress":{"current":1,"target":1}}]}}`
+				}
+			case q.Method == http.MethodPost && q.Path == reportPath:
+				return 200, `{"code":0}`
+			case q.Method == http.MethodPost && q.Path == "/activity/growth/tasks/first_buddy/claim":
+				return 200, `{"code":0,"data":{"credit":300}}`
+			}
+			return 404, `{}`
+		})
+		stubCNBases(t, srv.URL, srv.URL)
+
+		r := newCNRuntime(store, testJobsNow)
+		p := cnProvider(101, 10)
+		status, msg := runCatJob(context.Background(), cnJobContext(r, &p, state, testJobsNow))
+		if status != jobStatusOK || !strings.Contains(msg, "出发") {
+			t.Fatalf("status=%q msg=%q", status, msg)
+		}
+		if departs.Load() != 2 {
+			t.Fatalf("应在补 Buddy 后重试 depart, got %d 次", departs.Load())
+		}
+		if cnCountPath(rec.snapshot(), "/activity/growth/tasks/first_buddy/claim") != 1 {
+			t.Fatal("应先完成并领取 first_buddy")
+		}
+	})
+
+	t.Run("无 first_buddy 时给出清晰失败", func(t *testing.T) {
+		stubSleep(t)
+		store := newFakeCNStore()
+		var departs atomic.Int64
+		srv, _ := newCNServer(t, func(q cnReq) (int, string) {
+			switch {
+			case q.Method == http.MethodGet && q.Path == travelStatusPath:
+				return 200, `{"code":0,"data":{"state":"idle","daily_limit_reached":false}}`
+			case q.Method == http.MethodGet && q.Path == travelConfigPath:
+				return 200, `{"code":0,"data":{"locations":[{"id":7,"name":"巴黎"}]}}`
+			case q.Method == http.MethodPost && q.Path == travelDepartPath:
+				departs.Add(1)
+				return 200, `{"code":4001,"msg":"no active buddy"}`
+			case q.Method == http.MethodGet && q.Path == growthTasksPath:
+				return 200, `{"code":0,"data":{"tasks":[]}}`
+			}
+			return 404, `{}`
+		})
+		stubCNBases(t, srv.URL, srv.URL)
+
+		r := newCNRuntime(store, testJobsNow)
+		p := cnProvider(101, 10)
+		status, msg := runCatJob(context.Background(), cnJobContext(r, &p, nil, testJobsNow))
+		if status != jobStatusFailed {
+			t.Fatalf("补不上 Buddy 应 failed: status=%q msg=%q", status, msg)
+		}
+		if !strings.Contains(msg, "还没有 Buddy") {
+			t.Fatalf("应给出清晰失败文案: %q", msg)
+		}
+		if departs.Load() != 1 {
+			t.Fatalf("补不上 Buddy 不应重试 depart, got %d 次", departs.Load())
+		}
+	})
+}
+
+// TestGrowthSkipsWechatTask 钉住 wb_tasks.py:57-59：新增的公众号任务不可伪造，
+// 必须跳过且绝不上报事件。
+func TestGrowthSkipsWechatTask(t *testing.T) {
+	stubSleep(t)
+	store := newFakeCNStore()
+	srv, rec := newCNServer(t, func(q cnReq) (int, string) {
+		if q.Method == http.MethodGet && q.Path == growthTasksPath {
+			return 200, `{"code":0,"data":{"tasks":[
+				{"task_code":"wb_wechat_oa_subscribe_task","accept_status":"not_accepted","progress":{"current":0,"target":1}}]}}`
+		}
+		return 404, `{}`
+	})
+	stubCNBases(t, srv.URL, srv.URL)
+
+	r := newCNRuntime(store, testJobsNow)
+	p := cnProvider(101, 10)
+	status, msg := runGrowthJob(context.Background(), cnJobContext(r, &p, nil, testJobsNow))
+	if status != jobStatusOK {
+		t.Fatalf("status=%q msg=%q", status, msg)
+	}
+	if !strings.Contains(msg, "跳过=1") {
+		t.Fatalf("公众号任务应记为跳过: %q", msg)
+	}
+	if rec.count() != 1 {
+		t.Fatalf("公众号任务不应有接取/上报/领奖请求, got %d", rec.count())
+	}
+}
+
+// TestCNEnterpriseSkipped 钉住 wb_tasks.py:638/717/465：企业版无成长体系，
+// 三个 job 都 skipped 且零请求。
+func TestCNEnterpriseSkipped(t *testing.T) {
+	stubSleep(t)
+	srv, rec := newCNServer(t, func(q cnReq) (int, string) {
+		t.Errorf("企业版不应发起请求: %s %s", q.Method, q.Path)
+		return 200, `{}`
+	})
+	stubCNBases(t, srv.URL, srv.URL)
+
+	r := newCNRuntime(newFakeCNStore(), testJobsNow)
+	p := cnProvider(101, 10)
+	tok := &oauth.TokenSet{
+		AccessToken: cnTestJWT(`{"enterprise_id":"ent-9"}`),
+		Extra:       map[string]string{"uid": "u-test"},
+	}
+	for _, fn := range []func(context.Context, *JobContext) (string, string){runGrowthJob, runNightJob, runCatJob} {
+		jc := cnJobContext(r, &p, nil, testJobsNow)
+		jc.Tok = tok
+		status, msg := fn(context.Background(), jc)
+		if status != jobStatusSkipped || !strings.Contains(msg, "企业版") {
+			t.Fatalf("企业版应 skipped: status=%q msg=%q", status, msg)
+		}
+	}
+	if rec.count() != 0 {
+		t.Fatalf("企业版不应发起任何请求, got %d", rec.count())
+	}
+}
+
+// TestNightAcceptsUnaccepted 钉住 wb_tasks.py:730-737：夜猫子任务未接取时先接取，
+// 接取失败则今晚跳过并返回失败。
+func TestNightAcceptsUnaccepted(t *testing.T) {
+	cst := time.FixedZone("CST", 8*3600)
+	now := time.Date(2025, 3, 14, 23, 30, 0, 0, cst)
+
+	t.Run("未接取则先接取再上报", func(t *testing.T) {
+		stubSleep(t)
+		store := newFakeCNStore()
+		srv, rec := newCNServer(t, func(q cnReq) (int, string) {
+			switch {
+			case q.Method == http.MethodGet && q.Path == growthTasksPath:
+				return 200, `{"code":0,"data":{"tasks":[
+					{"task_code":"black_cat","accept_status":"not_accepted","progress":{"current":0,"target":3}}]}}`
+			case q.Method == http.MethodPost && q.Path == growthAcceptPath:
+				return 200, `{"code":0,"data":{"results":[{"task_code":"black_cat","status":"accepted"}]}}`
+			case q.Method == http.MethodPost && q.Path == reportPath:
+				return 200, `{"code":0}`
+			}
+			return 200, `{"code":0}`
+		})
+		stubCNBases(t, srv.URL, srv.URL)
+
+		r := newCNRuntime(store, now)
+		p := cnProvider(101, 10)
+		status, msg := runNightJob(context.Background(), cnJobContext(r, &p, nil, now))
+		if status != jobStatusOK {
+			t.Fatalf("应接取并上报成功: status=%q msg=%q", status, msg)
+		}
+		reqs := rec.snapshot()
+		acceptAt, reportAt := -1, -1
+		for i, q := range reqs {
+			if q.Path == growthAcceptPath && acceptAt < 0 {
+				acceptAt = i
+			}
+			if q.Path == reportPath && reportAt < 0 {
+				reportAt = i
+			}
+		}
+		if acceptAt < 0 || reportAt < 0 || acceptAt > reportAt {
+			t.Fatalf("应先接取后上报: accept=%d report=%d", acceptAt, reportAt)
+		}
+		var acc struct {
+			TaskCodes []string `json:"task_codes"`
+		}
+		if err := json.Unmarshal([]byte(reqs[acceptAt].Body), &acc); err != nil {
+			t.Fatalf("accept body: %v", err)
+		}
+		if len(acc.TaskCodes) != 1 || acc.TaskCodes[0] != "black_cat" {
+			t.Fatalf("accept 应只含 black_cat: %v", acc.TaskCodes)
+		}
+	})
+
+	t.Run("接取失败则跳过且不报请求", func(t *testing.T) {
+		stubSleep(t)
+		store := newFakeCNStore()
+		srv, rec := newCNServer(t, func(q cnReq) (int, string) {
+			switch {
+			case q.Method == http.MethodGet && q.Path == growthTasksPath:
+				return 200, `{"code":0,"data":{"tasks":[
+					{"task_code":"black_cat","accept_status":"not_accepted","progress":{"current":0,"target":3}}]}}`
+			case q.Method == http.MethodPost && q.Path == growthAcceptPath:
+				return 200, `{"code":400,"msg":"task not completed","echo":"super-secret"}`
+			}
+			return 404, `{}`
+		})
+		stubCNBases(t, srv.URL, srv.URL)
+
+		r := newCNRuntime(store, now)
+		p := cnProvider(101, 10)
+		status, msg := runNightJob(context.Background(), cnJobContext(r, &p, nil, now))
+		if status != jobStatusFailed || !strings.Contains(msg, "未接取") {
+			t.Fatalf("接取失败应 failed: status=%q msg=%q", status, msg)
+		}
+		if cnCountPath(rec.snapshot(), reportPath) != 0 {
+			t.Fatal("未接取不应上报夜猫子事件")
+		}
+		assertNoLeak(t, msg)
+	})
+}
+
+// TestCNIsEnterpriseSources 覆盖企业版判定的两个来源（token claim / Extra）。
+func TestCNIsEnterpriseSources(t *testing.T) {
+	cases := []struct {
+		name string
+		tok  *oauth.TokenSet
+		want bool
+	}{
+		{"nil", nil, false},
+		{"非 JWT token", &oauth.TokenSet{AccessToken: "test-token"}, false},
+		{"JWT claim 空", &oauth.TokenSet{AccessToken: cnTestJWT(`{"uid":"u"}`)}, false},
+		{"JWT claim enterprise_id", &oauth.TokenSet{AccessToken: cnTestJWT(`{"enterprise_id":"e1"}`)}, true},
+		{"Extra enterprise_id", &oauth.TokenSet{Extra: map[string]string{"enterprise_id": "e2"}}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cnIsEnterprise(tc.tok); got != tc.want {
+				t.Fatalf("cnIsEnterprise() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

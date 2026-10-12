@@ -3,7 +3,10 @@ package workbuddy
 // tasks_cn.go P4 国内版运营自动化：成长/积分任务（growth）、夜猫子（night）、
 // 猫猫旅行（cat）。
 //
-// 上游事实来源：wb2a 的 wb_tasks.py（commit 6c2a663）。本文件只做协议搬运：
+// 上游事实来源：wb2a 的 wb_tasks.py。移植基线 commit 6c2a663，已同步到
+// commit 0ba3a29（v1.7）：auto 任务优先 + task_type、_progress_one 进度轮询、
+// accept reasons、first_buddy 规格变更与 ensure_buddy、猫猫旅行 no-active-buddy
+// 补 Buddy 重试、企业版账号跳过、新增不可伪造的公众号任务。本文件只做协议搬运：
 // 路径、请求体形状、头、业务码判定逐条对齐 wb_tasks.py，代码结构按 KeyGrid 的
 // 任务框架重排。
 //
@@ -95,30 +98,38 @@ var (
 type growthTaskSpec struct {
 	Kind        string // 事件种类（buildEvent 的 kind）
 	Target      int    // 默认目标次数（上游未回 target 时回落）
+	Reward      int    // 展示用奖励积分（wb_tasks.py:38-60 reward，仅留档）
 	Name        string // 展示名
 	Unforgeable bool   // 不可伪造（真实动作），不接取、不上报
+	Reason      string // 不可伪造原因（wb_tasks.py:57-60 reason）
 }
 
-// growthTaskSpecs 任务码 → 规格（wb_tasks.py:37-56 TASK_SPECS，仅保留本移植用到的字段）。
+// growthTaskSpecs 任务码 → 规格（wb_tasks.py:37-61 TASK_SPECS）。
 var growthTaskSpecs = map[string]growthTaskSpec{
-	"create_canvas":       {Kind: "canvas", Target: 1, Name: "创建设计任务"},
-	"template_5":          {Kind: "template", Target: 5, Name: "模板创建任务"},
-	"expert_5":            {Kind: "expert", Target: 5, Name: "使用专家助手"},
-	"Expert_team_use_3":   {Kind: "team", Target: 3, Name: "使用专家团队"},
-	"skill_1":             {Kind: "skill", Target: 1, Name: "体验技能"},
-	"automation_1":        {Kind: "automation", Target: 1, Name: "创建自动化任务"},
-	"playbook_prompt":     {Kind: "playbook", Target: 1, Name: "灵感案例使用"},
-	"Expert_lighthouse":   {Kind: "lighthouse", Target: 1, Name: "轻量云专家使用"},
-	"Buddy_App":           {Kind: "buddy5", Target: 1, Name: "进入 Buddy 应用"},
-	"Buddy_App_QQ":        {Kind: "buddy5", Target: 1, Name: "企鹅教师助手"},
-	"Hp_Appearance":       {Kind: "skin", Target: 1, Name: "应用主题外观"},
-	"chat_5":              {Kind: "chat", Target: 5, Name: "发起 5 次对话"},
-	"Model_chat_GLM5.2":   {Kind: "glmchat", Target: 1, Name: "体验 GLM-5.2"},
-	"black_cat":           {Kind: "cat", Target: 3, Name: "夜猫子任务 (23:00-08:00)"},
-	"RichMeow_Chat":       {Kind: "richmeow", Target: 1, Name: "桌面对话事件链"},
-	"Library_read":        {Kind: "library", Target: 1, Name: "浏览资料库"},
-	"first_buddy":         {Kind: "buddy_first", Target: 1, Name: "领养首只猫猫"},
-	"Expert_Philanthropy": {Unforgeable: true, Name: "公益爱心捐赠"},
+	"create_canvas":     {Kind: "canvas", Target: 1, Reward: 300, Name: "创建设计任务"},
+	"template_5":        {Kind: "template", Target: 5, Reward: 200, Name: "模板创建任务"},
+	"expert_5":          {Kind: "expert", Target: 5, Reward: 200, Name: "使用专家助手"},
+	"Expert_team_use_3": {Kind: "team", Target: 3, Reward: 150, Name: "使用专家团队"},
+	"skill_1":           {Kind: "skill", Target: 1, Reward: 100, Name: "体验技能"},
+	"automation_1":      {Kind: "automation", Target: 1, Reward: 100, Name: "创建自动化任务"},
+	"playbook_prompt":   {Kind: "playbook", Target: 1, Reward: 100, Name: "灵感案例使用"},
+	"Expert_lighthouse": {Kind: "lighthouse", Target: 1, Reward: 100, Name: "轻量云专家使用"},
+	"Buddy_App":         {Kind: "buddy5", Target: 1, Reward: 100, Name: "进入 Buddy 应用"},
+	"Buddy_App_QQ":      {Kind: "buddy5", Target: 1, Reward: 100, Name: "企鹅教师助手"},
+	"Hp_Appearance":     {Kind: "skin", Target: 1, Reward: 100, Name: "应用主题外观"},
+	"chat_5":            {Kind: "chat", Target: 5, Reward: 100, Name: "发起 5 次对话"},
+	"Model_chat_GLM5.2": {Kind: "glmchat", Target: 1, Reward: 100, Name: "体验 GLM-5.2"},
+	"black_cat":         {Kind: "cat", Target: 3, Reward: 100, Name: "夜猫子任务 (23:00-08:00)"},
+	"RichMeow_Chat":     {Kind: "richmeow", Target: 1, Reward: 100, Name: "桌面对话事件链"},
+	"Library_read":      {Kind: "library", Target: 1, Reward: 100, Name: "浏览资料库"},
+	// first_buddy 是 auto 类（上游不接受接取），完成后领奖才发放 Buddy 实例；
+	// 它是所有 single 任务与猫猫旅行的前置（"prerequisite not met: first_buddy"）。
+	// 规格由 buddy_first/领养首只猫猫 变更为 chat/领取一只 Buddy（wb_tasks.py:54-56）。
+	"first_buddy": {Kind: "chat", Target: 1, Reward: 300, Name: "领取一只 Buddy"},
+	// 需在微信关注官方公众号满 24h，无法伪造事件，只能跳过（wb_tasks.py:57-59）。
+	"wb_wechat_oa_subscribe_task": {Unforgeable: true, Reward: 100, Name: "关注官方公众号",
+		Reason: "需在微信关注「腾讯 WorkBuddy」公众号满 24 小时"},
+	"Expert_Philanthropy": {Unforgeable: true, Reward: 0, Name: "公益爱心捐赠", Reason: "真实捐款动作"},
 }
 
 // desktopOnlyTasks 只认桌面端真实点击的任务（wb_tasks.py:58-69 注释：伪造 /v2/report
@@ -326,6 +337,10 @@ func runGrowthJob(ctx context.Context, jc *JobContext) (status string, message s
 	if jc.Tok == nil {
 		return jobStatusFailed, "渠道凭据缺失"
 	}
+	// 企业版账号无成长体系，直接跳过且零请求（wb_tasks.py:638-639）。
+	if cnIsEnterprise(jc.Tok) {
+		return jobStatusSkipped, "企业版账号无成长体系，跳过"
+	}
 	g, err := newGrowthRunner(ctx, jc, realm)
 	if err != nil {
 		return jobStatusFailed, "构建成长任务请求头失败"
@@ -350,6 +365,10 @@ func runNightJob(ctx context.Context, jc *JobContext) (status string, message st
 	}
 	if jc.Tok == nil {
 		return jobStatusFailed, "渠道凭据缺失"
+	}
+	// 企业版优先于窗口判定（wb_tasks.py:717-723）。
+	if cnIsEnterprise(jc.Tok) {
+		return jobStatusSkipped, "企业版账号无成长体系，跳过"
 	}
 	if !inNightWindow(jc.Now) {
 		return jobStatusSkipped, "当前不在 23:00-08:00 夜间窗口"
@@ -378,6 +397,10 @@ func runCatJob(ctx context.Context, jc *JobContext) (status string, message stri
 	if jc.Tok == nil {
 		return jobStatusFailed, "渠道凭据缺失"
 	}
+	// 企业版账号无成长体系，直接跳过且零请求（wb_tasks.py:465-466）。
+	if cnIsEnterprise(jc.Tok) {
+		return jobStatusSkipped, "企业版账号无成长体系，跳过"
+	}
 	g, err := newGrowthRunner(ctx, jc, realm)
 	if err != nil {
 		return jobStatusFailed, "构建猫猫旅行请求头失败"
@@ -385,15 +408,62 @@ func runCatJob(ctx context.Context, jc *JobContext) (status string, message stri
 	return g.runCat()
 }
 
-// inNightWindow 夜猫子窗口：本地时间 23:00–08:00（wb_tasks.py:74-76）。
+// inNightWindow 夜猫子窗口：本地时间 23:00–08:00（wb_tasks.py:79-81）。
 func inNightWindow(now time.Time) bool {
 	h := now.Hour()
 	return h >= 23 || h < 8
 }
 
+// cnIsEnterprise 判定账号是否隶属企业版空间（企业版无成长体系）。
+//
+// 对齐 wb_accounts.py:1844-1851 is_enterprise()：登录数据里的 enterpriseId
+// （wb_accounts.py:493）或 accessToken 未校验 JWT 的 enterprise_id claim
+// （wb_accounts.py:1836-1842 jwt_enterprise_id）任一非空即为企业版。
+//
+// 我们只能覆盖 token claim 这一路：CN OAuth 登录（codebuddy.go Resolve）没有把
+// 登录响应的 data.enterpriseId 持久化进 TokenSet.Extra。
+// TODO(上游 A-企业版): 待 CN 登录响应 data.enterpriseId 落库到 TokenSet.Extra 后
+// 在此补上账号数据判定；当前缺失该数据，故仅按 token claim 做只读判定。
+func cnIsEnterprise(tok *oauth.TokenSet) bool {
+	if tok == nil {
+		return false
+	}
+	for _, k := range []string{"enterprise_id", "enterpriseId"} {
+		if strings.TrimSpace(tok.Extra[k]) != "" {
+			return true
+		}
+	}
+	return cnJWTClaim(tok.AccessToken, "enterprise_id") != ""
+}
+
+// cnJWTClaim 从未校验的 JWT payload 里读单个字符串 claim；解析失败返回空串。
+// 与 identUIDFromJWT 同一策略（只读请求头/判定，不做签名校验，绝不落日志）。
+func cnJWTClaim(token, key string) string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ""
+	}
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	payload, ok := identDecodeSegment(parts[1])
+	if !ok {
+		return ""
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ""
+	}
+	return toText(claims[key])
+}
+
 // ---- growth 状态机 ----
 
 // runGrowth 执行成长任务全流程。
+//
+// 对齐 wb_tasks.py:634-709：清单 → auto 任务优先点亮领奖 → 批量接取非 auto 未接任务
+// → 复核补接 → 逐任务 _progress_one → flush 去重池。INTL/企业版由入口跳过。
 func (g *growthRunner) runGrowth() (string, string) {
 	tasks, err := g.fetchTasks()
 	if err != nil {
@@ -403,9 +473,6 @@ func (g *growthRunner) runGrowth() (string, string) {
 		return jobStatusFailed, "成长任务清单为空"
 	}
 
-	out := g.acceptPending(tasks)
-	tasks = out.tasks
-
 	var reported, claimed, skipped, failed int
 	failReason := ""
 	setFail := func(reason string) {
@@ -414,70 +481,56 @@ func (g *growthRunner) runGrowth() (string, string) {
 			failReason = reason
 		}
 	}
-
-	for i := range tasks {
-		t := tasks[i]
-		spec, ok := growthTaskSpecs[t.Code]
-		if !ok || spec.Unforgeable {
-			continue
-		}
-		if t.Status == "claimed" {
-			continue
-		}
-		// 已完成的任务先领奖（wb_tasks.py:489-498）。
-		if t.Status == "completed" || t.Current >= t.Target {
-			if okClaim, _, reason := g.claimTask(t.Code); okClaim {
-				claimed++
-			} else {
-				setFail(reason)
-			}
-			sleep(growthGap)
-			continue
-		}
-		// 只认桌面端真实点击的任务（wb_tasks.py:501-505）。
-		if _, desktop := desktopOnlyTasks[t.Code]; desktop {
-			skipped++
-			continue
-		}
-		// 夜猫子任务白天不计数（wb_tasks.py:508-511）。
-		if t.Code == nightTaskCode && !inNightWindow(g.now) {
-			skipped++
-			continue
-		}
-		// 接取失败就上报等于白费（wb_tasks.py:513-516）。
-		if t.Status == "not_accepted" {
-			setFail("任务未接取")
-			continue
-		}
-
-		need := t.Target - t.Current
-		if need < 1 {
-			need = 1
-		}
-		if g.reportTask(t, spec, need) {
+	apply := func(res progressResult) {
+		if res.reported {
 			reported++
-		} else {
-			setFail("事件上报失败")
 		}
-		sleep(growthReportSettle)
+		if res.claimed {
+			claimed++
+		}
+		if res.skipped {
+			skipped++
+		}
+		if res.failed {
+			setFail(res.reason)
+		}
+	}
 
-		prog := g.pollProgress(t.Code, t.Current, t.Target)
-		if prog < t.Target {
-			sleep(growthGap)
+	// 0. auto 类任务（如 first_buddy）不需要接取，且可能是其他任务与猫猫旅行的
+	//    前置：必须先把它们点亮并领奖（first_buddy 的奖励就是 Buddy 实例），
+	//    否则 single 任务接取会报 "prerequisite not met: first_buddy"
+	//    （wb_tasks.py:650-655）。
+	for i := range tasks {
+		if tasks[i].TaskType != "auto" {
 			continue
 		}
-		if okClaim, _, reason := g.claimTask(t.Code); okClaim {
-			claimed++
-		} else {
-			setFail(reason)
+		apply(g.progressOne(tasks[i]))
+	}
+
+	// 1. auto 类不接受接取，unforgeable 无法自动化（wb_tasks.py:657-691）。
+	out := g.acceptPending(tasks)
+	tasks = out.tasks
+	if len(tasks) == 0 {
+		g.flushUsedEventIDs()
+		return jobStatusFailed, "接取后无法获取任务清单，本轮中止"
+	}
+
+	// 2. 处理每个任务（auto 已在第 0 步处理过，wb_tasks.py:693-697）。
+	for i := range tasks {
+		if tasks[i].TaskType == "auto" {
+			continue
 		}
-		sleep(growthGap)
+		apply(g.progressOne(tasks[i]))
 	}
 
 	g.flushUsedEventIDs()
 
 	msg := fmt.Sprintf("成长任务完成: 接取=%d 上报=%d 领奖=%d 跳过=%d 失败=%d",
 		out.accepted, reported, claimed, skipped, failed)
+	// 接取失败原因（上游结构化 msg，已清洗截断；wb_tasks.py:666-670）。
+	if len(out.reasons) > 0 {
+		msg += " 接取原因=" + truncateRunes(strings.Join(out.reasons, "; "), 160)
+	}
 	if failed > 0 && failReason != "" {
 		msg += " 首因=" + truncateRunes(failReason, 120)
 	}
@@ -487,24 +540,110 @@ func (g *growthRunner) runGrowth() (string, string) {
 	return jobStatusOK, truncateRunes(msg, maxJobMessageLen)
 }
 
+// progressResult 单个任务推进的结果（用于汇总计数，不再回传积分）。
+type progressResult struct {
+	reported bool   // 上报了事件（无论上游是否接受）
+	claimed  bool   // 领奖成功
+	skipped  bool   // 诚实跳过（不可伪造/桌面专属/窗口外/未接取）
+	failed   bool   // 上报或领奖失败
+	reason   string // 首个失败原因（已清洗）
+}
+
+// progressOne 推进单个任务：领奖/跳过/上报 + 进度轮询 + 达标才领奖。
+//
+// 对齐 wb_tasks.py:525-631 _progress_one：auto 类任务不需要接取，事件可直接点亮；
+// single 类未接取时上报不计进度，跳过等接取成功；上报后轮询最多 6 次，只有进度
+// 真正达标才领奖，否则顺延到下次运行。
+func (g *growthRunner) progressOne(t growthTask) progressResult {
+	code := t.Code
+	spec, hasSpec := growthTaskSpecs[code]
+	if !hasSpec || spec.Unforgeable {
+		// 不可伪造任务无法自动化，跳过（wb_tasks.py:531-536）。
+		return progressResult{skipped: true}
+	}
+
+	status := t.Status
+	cur, tgt := t.Current, t.Target
+	if tgt < 1 {
+		tgt = 1
+	}
+	if status == "claimed" {
+		return progressResult{}
+	}
+
+	// 已完成的任务先领奖 —— 桌面端/夜间任务也可能被真实操作完成，必须先结算
+	// （wb_tasks.py:545-557）。
+	if status == "completed" || cur >= tgt {
+		okClaim, _, reason := g.claimTask(code)
+		sleep(growthGap)
+		if okClaim {
+			return progressResult{claimed: true}
+		}
+		return progressResult{failed: true, reason: reason}
+	}
+
+	// 桌面专属：伪造事件不推进进度，诚实跳过（wb_tasks.py:559-564）。
+	if _, desktop := desktopOnlyTasks[code]; desktop {
+		return progressResult{skipped: true}
+	}
+	// 夜猫子任务窗口外不计数（wb_tasks.py:566-570）。
+	if code == nightTaskCode && !inNightWindow(g.now) {
+		return progressResult{skipped: true}
+	}
+	// 未接取的非 auto 任务上报白费，跳过（wb_tasks.py:572-575）。
+	if status == "not_accepted" && t.TaskType != "auto" {
+		return progressResult{skipped: true}
+	}
+
+	need := tgt - cur
+	if need < 1 {
+		need = 1
+	}
+	res := progressResult{}
+	if g.reportTask(t, spec, need) {
+		res.reported = true
+	} else {
+		res.failed = true
+		res.reason = "事件上报失败"
+	}
+	sleep(growthReportSettle)
+
+	// 等上游落账：进度未达标则顺延，不领奖（wb_tasks.py:600-620）。
+	if g.pollProgress(code, cur, tgt) < tgt {
+		sleep(growthGap)
+		return res
+	}
+	okClaim, _, reason := g.claimTask(code)
+	sleep(growthGap)
+	if okClaim {
+		res.claimed = true
+		return res
+	}
+	res.failed = true
+	if res.reason == "" {
+		res.reason = reason
+	}
+	return res
+}
+
 // acceptOutcome 接取阶段的结果。
 type acceptOutcome struct {
 	tasks    []growthTask
 	accepted int
+	reasons  []string // 接取失败的结构化原因（已清洗）
 }
 
-// acceptPending 批量接取未接任务；仅当上游报告失败时才复核并补一次（wb_tasks.py:441-469）。
+// acceptPending 批量接取未接任务：接取后统一复核一次，仍待接取的再补一次
+// （wb_tasks.py:657-691）。
 func (g *growthRunner) acceptPending(tasks []growthTask) acceptOutcome {
 	codes := pendingCodes(tasks)
 	if len(codes) == 0 {
 		return acceptOutcome{tasks: tasks}
 	}
-	acc, failed := g.acceptTasks(codes)
-	out := acceptOutcome{tasks: markAccepted(tasks, acc), accepted: len(acc)}
-	if len(failed) == 0 {
-		return out
-	}
-	// 上游偶尔瞬时拒绝整批：重列一次，仍待接取的再补一次（wb_tasks.py:452-462）。
+	acc, _, reasons := g.acceptTasks(codes)
+	out := acceptOutcome{tasks: markAccepted(tasks, acc), accepted: len(acc), reasons: reasons}
+	sleep(growthGap)
+	// 上游偶尔瞬时拒绝整批：接取后重列一次（wb_tasks.py:673-677）。
 	fresh, err := g.fetchTasks()
 	if err != nil {
 		return out
@@ -514,8 +653,11 @@ func (g *growthRunner) acceptPending(tasks []growthTask) acceptOutcome {
 	if len(still) == 0 {
 		return out
 	}
-	acc2, _ := g.acceptTasks(still)
+	// 仍处于未接取的再补一次，否则后续上报全部作用在未接取任务上（wb_tasks.py:678-684）。
+	acc2, _, reasons2 := g.acceptTasks(still)
 	out.accepted += len(acc2)
+	out.reasons = append(out.reasons, reasons2...)
+	sleep(growthGap)
 	if fresh2, err2 := g.fetchTasks(); err2 == nil {
 		out.tasks = fresh2
 	} else {
@@ -524,11 +666,11 @@ func (g *growthRunner) acceptPending(tasks []growthTask) acceptOutcome {
 	return out
 }
 
-// pendingCodes 需要接取的任务码（排除不可伪造任务）。
+// pendingCodes 需要接取的任务码（排除不可伪造与 auto 任务，wb_tasks.py:658-660）。
 func pendingCodes(tasks []growthTask) []string {
 	var codes []string
 	for _, t := range tasks {
-		if t.Status != "not_accepted" {
+		if t.Status != "not_accepted" || t.TaskType == "auto" {
 			continue
 		}
 		if spec, ok := growthTaskSpecs[t.Code]; ok && spec.Unforgeable {
@@ -651,6 +793,17 @@ func (g *growthRunner) runNight() (string, string) {
 	if t.Status == "claimed" {
 		return jobStatusOK, "夜猫子任务已领奖"
 	}
+	// 上游只对已接取的任务累计进度；夜猫子任务也必须先接取（wb_tasks.py:730-737）。
+	if t.Status == "not_accepted" {
+		acc, _, reasons := g.acceptTasks([]string{nightTaskCode})
+		if len(acc) == 0 {
+			msg := "夜猫子任务未接取，今晚跳过"
+			if why := truncateRunes(strings.Join(reasons, "; "), 120); why != "" {
+				msg += ": " + why
+			}
+			return jobStatusFailed, truncateRunes(msg, maxJobMessageLen)
+		}
+	}
 	cur, tgt := t.Current, t.Target
 	if tgt < 1 {
 		tgt = 3
@@ -694,21 +847,19 @@ func (g *growthRunner) runNight() (string, string) {
 	return jobStatusOK, fmt.Sprintf("夜猫子今晚 +1 (进度 %d/%d)", newCur, tgt)
 }
 
-// runCat 猫猫旅行（wb_tasks.py:368-425）。
+// runCat 猫猫旅行（wb_tasks.py:463-522）。
 func (g *growthRunner) runCat() (string, string) {
-	status, body, err := g.doJSONRetry(http.MethodGet, g.base()+travelStatusPath, g.hdr, nil)
+	// ensure_buddy 可能推进 first_buddy 并用到事件去重池，收尾统一落盘。
+	defer g.flushUsedEventIDs()
+	st, err := g.travelStatus()
 	if err != nil {
-		return jobStatusFailed, truncateRunes("查询猫猫旅行状态失败: "+jobTransportErrMessage(g.ctx, err), maxJobMessageLen)
+		return jobStatusFailed, truncateRunes("查询猫猫旅行状态失败: "+err.Error(), maxJobMessageLen)
 	}
-	if status < 200 || status >= 300 {
-		return jobStatusFailed, truncateRunes("查询猫猫旅行状态失败: "+cnHTTPErrText(status, body), maxJobMessageLen)
-	}
-	st := rootData(body)
 	state := toText(st["state"])
 
 	switch state {
 	case "arrived":
-		// 领奖（wb_tasks.py:381-391）。
+		// 领奖（wb_tasks.py:475-485）。
 		cstatus, cbody, cerr := g.doJSONRetry(http.MethodPost, g.base()+travelClaimPath, g.hdr, []byte("{}"))
 		if cerr != nil {
 			return jobStatusFailed, "猫猫旅行领奖请求失败"
@@ -722,27 +873,37 @@ func (g *growthRunner) runCat() (string, string) {
 		return jobStatusOK, "猫猫旅行归来，领奖成功"
 
 	case "idle":
-		// 今日已完成（wb_tasks.py:393-395）。
+		// 今日已完成（wb_tasks.py:487-489）。
 		if truthy(st["daily_limit_reached"]) {
 			return jobStatusOK, "猫猫今日已完成旅行，明日 00:00 刷新"
 		}
-		// 目的地取自 config，缺省 1（wb_tasks.py:398-409）。
+		// 目的地取自 config，缺省 1（wb_tasks.py:490-503）。
 		var lid any = 1
 		if cfstatus, cfbody, cferr := g.doJSONRetry(http.MethodGet, g.base()+travelConfigPath, g.hdr, nil); cferr == nil && cfstatus >= 200 && cfstatus < 300 {
 			if loc := firstLocationID(cfbody); loc != nil {
 				lid = loc
 			}
 		}
-		depBody, _ := json.Marshal(map[string]any{"location_id": lid})
-		dstatus, dbody, derr := g.doJSONRetry(http.MethodPost, g.base()+travelDepartPath, g.hdr, depBody)
-		if derr != nil {
-			return jobStatusFailed, "猫猫旅行派出请求失败"
+		// 状态里的 buddy_id 是「当前旅行实例」id，猫在家时恒为 0，不能据此判断；
+		// 以 depart 的 "no active buddy" 为准：先直接派，失败再补齐 first_buddy
+		// 重试一次（wb_tasks.py:504-513）。
+		data, derr := g.travelDepart(lid)
+		if data == nil && strings.Contains(strings.ToLower(derr), "no active buddy") {
+			if g.ensureBuddy() {
+				data, derr = g.travelDepart(lid)
+			} else {
+				return jobStatusFailed, "还没有 Buddy：需先完成并领取「领取一只 Buddy」任务"
+			}
 		}
-		if dstatus < 200 || dstatus >= 300 {
-			return jobStatusFailed, truncateRunes("猫猫旅行派出失败: "+cnHTTPErrText(dstatus, dbody), maxJobMessageLen)
+		if data == nil {
+			return jobStatusFailed, truncateRunes("猫猫旅行派出失败: "+derr, maxJobMessageLen)
 		}
-		if !upstreamCodeOK(dbody) {
-			return jobStatusFailed, "猫猫旅行派出被上游拒绝"
+		loc := ""
+		if m, ok := data["location"].(map[string]any); ok {
+			loc = toText(m["name"])
+		}
+		if loc != "" {
+			return jobStatusOK, truncateRunes("猫猫已出发前往「"+loc+"」，预计数小时后归来", maxJobMessageLen)
 		}
 		return jobStatusOK, "猫猫已出发旅行"
 
@@ -757,7 +918,61 @@ func (g *growthRunner) runCat() (string, string) {
 	}
 }
 
-// ---- 事件构造（对齐 wb_tasks.py:278-344 build_event） ----
+// travelStatus GET 旅行状态，返回 data 对象（wb_tasks.py:411-416 _travel_status）。
+func (g *growthRunner) travelStatus() (map[string]any, error) {
+	status, body, err := g.doJSONRetry(http.MethodGet, g.base()+travelStatusPath, g.hdr, nil)
+	if err != nil {
+		return nil, fmt.Errorf("%s", jobTransportErrMessage(g.ctx, err))
+	}
+	if status < 200 || status >= 300 {
+		return nil, fmt.Errorf("%s", cnHTTPErrText(status, body))
+	}
+	return rootData(body), nil
+}
+
+// travelDepart POST 派出旅行，返回 (data, errMsg)：成功 data 非 nil，失败 errMsg
+// 只保留结构化上游文案（wb_tasks.py:437-460 _travel_depart）。
+func (g *growthRunner) travelDepart(lid any) (map[string]any, string) {
+	body, _ := json.Marshal(map[string]any{"location_id": lid})
+	status, respBody, err := g.doJSONRetry(http.MethodPost, g.base()+travelDepartPath, g.hdr, body)
+	if err != nil {
+		return nil, jobTransportErrMessage(g.ctx, err)
+	}
+	if status < 200 || status >= 300 {
+		return nil, cnHTTPErrText(status, respBody)
+	}
+	if !upstreamCodeOK(respBody) {
+		return nil, cnBizErrText(respBody)
+	}
+	return rootData(respBody), ""
+}
+
+// ensureBuddy 确保账号已领到 Buddy 实例：没有则完成并领取 first_buddy。
+//
+// first_buddy 是 auto 类任务，其奖励就是 Buddy 实例，是 single 任务与猫猫旅行的
+// 前置。返回是否已就绪（wb_tasks.py:419-434）。
+func (g *growthRunner) ensureBuddy() bool {
+	tasks, err := g.fetchTasks()
+	if err != nil {
+		return false
+	}
+	fb, ok := findGrowthTask(tasks, "first_buddy")
+	if !ok {
+		return false
+	}
+	if fb.Status == "claimed" {
+		return true
+	}
+	g.progressOne(fb)
+	tasks, err = g.fetchTasks()
+	if err != nil {
+		return false
+	}
+	fb, ok = findGrowthTask(tasks, "first_buddy")
+	return ok && fb.Status == "claimed"
+}
+
+// ---- 事件构造（对齐 wb_tasks.py:321-387 build_event） ----
 
 // buildEvent 构造一类行为事件。expert 仅对 expert/team 类有意义（每次用不同 id）。
 func (g *growthRunner) buildEvent(kind string, idx int, expert *expertID) map[string]any {
@@ -939,8 +1154,11 @@ func (g *growthRunner) fetchTasks() ([]growthTask, error) {
 	return parseGrowthTasks(body), nil
 }
 
-// acceptTasks 批量接取，每批 20（wb_tasks.py:165-223）。返回 accepted / failed 任务码。
-func (g *growthRunner) acceptTasks(codes []string) (accepted, failed []string) {
+// acceptTasks 批量接取，每批 20（wb_tasks.py:205-266）。
+//
+// 返回 accepted / failed 任务码与失败原因 reasons。原因只取结构化上游文案
+// （upstreamErrSummary / 每个 result 的 message），经 cnReason 截断，绝不回显正文。
+func (g *growthRunner) acceptTasks(codes []string) (accepted, failed, reasons []string) {
 	const chunk = 20
 	for i := 0; i < len(codes); i += chunk {
 		end := i + chunk
@@ -952,10 +1170,17 @@ func (g *growthRunner) acceptTasks(codes []string) (accepted, failed []string) {
 		status, respBody, err := g.doJSONRetry(http.MethodPost, g.base()+growthAcceptPath, g.hdr, body)
 		if err != nil {
 			failed = append(failed, part...)
+			reasons = append(reasons, cnReason("接取请求失败: "+jobTransportErrMessage(g.ctx, err)))
 			continue
 		}
-		if status < 200 || status >= 300 || !upstreamCodeOK(respBody) {
+		if status < 200 || status >= 300 {
 			failed = append(failed, part...)
+			reasons = append(reasons, cnReason(cnHTTPErrText(status, respBody)))
+			continue
+		}
+		if !upstreamCodeOK(respBody) {
+			failed = append(failed, part...)
+			reasons = append(reasons, cnReason(cnBizErrText(respBody)))
 			continue
 		}
 		seen := make(map[string]bool, len(part))
@@ -965,6 +1190,11 @@ func (g *growthRunner) acceptTasks(codes []string) (accepted, failed []string) {
 				accepted = append(accepted, item.Code)
 			} else {
 				failed = append(failed, item.Code)
+				msg := item.Message
+				if msg == "" {
+					msg = item.Status
+				}
+				reasons = append(reasons, cnReason(item.Code+": "+msg))
 			}
 		}
 		for _, c := range part {
@@ -973,7 +1203,18 @@ func (g *growthRunner) acceptTasks(codes []string) (accepted, failed []string) {
 			}
 		}
 	}
-	return accepted, failed
+	return accepted, failed, reasons
+}
+
+// cnReason 统一清洗失败原因：去空白 + rune 截断，只允许结构化上游文案进入 Message。
+func cnReason(s string) string { return truncateRunes(strings.TrimSpace(s), 160) }
+
+// cnBizErrText 200 + 非 0 业务码的结构化摘要（无「上游返回 200」前缀）。
+func cnBizErrText(body []byte) string {
+	if s := upstreamErrSummary(body); s != "" {
+		return s
+	}
+	return "上游拒绝"
 }
 
 // reportEvents POST /v2/report（wb_tasks.py:347-365）。
@@ -1039,21 +1280,23 @@ func claimResult(body []byte) (bool, float64, string) {
 
 // growthTask 解析后的任务条目。
 type growthTask struct {
-	Code    string
-	Name    string
-	Status  string
-	Current int
-	Target  int
-	JumpURL string
+	Code     string
+	Name     string
+	Status   string
+	TaskType string // auto 类任务不需要接取（wb_tasks.py:128 task_type）
+	Current  int
+	Target   int
+	JumpURL  string
 }
 
 // acceptResult 暂存 /tasks/accept 的单个结果。
 type acceptResult struct {
-	Code   string
-	Status string
+	Code    string
+	Status  string
+	Message string // 单个任务的失败文案（wb_tasks.py:261 item.message）
 }
 
-// parseGrowthTasks 解析清单（wb_tasks.py:109-128）。
+// parseGrowthTasks 解析清单（wb_tasks.py:107-138）。
 func parseGrowthTasks(body []byte) []growthTask {
 	var root struct {
 		Data struct {
@@ -1062,6 +1305,7 @@ func parseGrowthTasks(body []byte) []growthTask {
 				Title        string `json:"title"`
 				JumpURL      string `json:"jump_url"`
 				AcceptStatus string `json:"accept_status"`
+				TaskType     string `json:"task_type"`
 				Progress     struct {
 					Current float64 `json:"current"`
 					Target  float64 `json:"target"`
@@ -1099,20 +1343,21 @@ func parseGrowthTasks(body []byte) []growthTask {
 			st = "not_accepted"
 		}
 		out = append(out, growthTask{
-			Code: t.TaskCode, Name: name, Status: st,
+			Code: t.TaskCode, Name: name, Status: st, TaskType: t.TaskType,
 			Current: int(t.Progress.Current), Target: tgt, JumpURL: t.JumpURL,
 		})
 	}
 	return out
 }
 
-// parseAcceptResults 解析接取结果（wb_tasks.py:209-222）。
+// parseAcceptResults 解析接取结果（wb_tasks.py:251-262）。
 func parseAcceptResults(body []byte) []acceptResult {
 	var root struct {
 		Data struct {
 			Results []struct {
 				TaskCode string `json:"task_code"`
 				Status   string `json:"status"`
+				Message  string `json:"message"`
 			} `json:"results"`
 		} `json:"data"`
 	}
@@ -1121,7 +1366,7 @@ func parseAcceptResults(body []byte) []acceptResult {
 	}
 	out := make([]acceptResult, 0, len(root.Data.Results))
 	for _, r := range root.Data.Results {
-		out = append(out, acceptResult{Code: r.TaskCode, Status: r.Status})
+		out = append(out, acceptResult{Code: r.TaskCode, Status: r.Status, Message: r.Message})
 	}
 	return out
 }
