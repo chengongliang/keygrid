@@ -225,6 +225,9 @@ export default function Providers() {
   const [testTarget, setTestTarget] = useState('')
   const [testingModel, setTestingModel] = useState(false)
   const [testRes, setTestRes] = useState<TestModelResult | null>(null)
+  // 模型弹窗内的请求错误（拉取/测活/真实测试）：随弹窗就地展示；
+  // 不写页面级 err，否则会落在弹窗遮罩下面，弹窗开着时用户根本看不到
+  const [modelsErr, setModelsErr] = useState('')
   // 在途请求代数：弹窗切换/重新拉取后，迟到的旧响应直接丢弃（上游探测最长挂 30s）
   const fetchGenRef = useRef(0)
   const testGenRef = useRef(0)
@@ -390,6 +393,8 @@ export default function Providers() {
   // 手动刷新额度（POST /api/providers/{id}/quota/refresh）；refreshSliently=true 时不弹全局错误
   const refreshQuota = async (p: Provider, silently = false) => {
     setQuotaRefreshing(true)
+    // 重新查询先清旧错误，避免成功后上一次的失败提示还挂在弹窗里
+    if (!silently) setErr('')
     try {
       const snap = await api.post<QuotaSnapshot | null>(`/api/providers/${p.id}/quota/refresh`)
       if (snap) {
@@ -441,6 +446,7 @@ export default function Providers() {
     }
     try {
       const p = await api.post<Provider>('/api/providers', body)
+      setErr('')
       setWiz(null)
       load()
       if (p.kind === 'oauth') startOauthFlow(p)
@@ -475,6 +481,7 @@ export default function Providers() {
     if (editForm.kind === 'api_key' && editForm.api_key) body.api_key = editForm.api_key
     try {
       await api.patch(`/api/providers/${editForm.id}`, body)
+      setErr('')
       setEditForm(null)
       load()
     } catch (e: any) { setErr(e.message) }
@@ -483,13 +490,13 @@ export default function Providers() {
   // 拉取上游模型列表（GET /v1/models）
   const fetchModels = async (p: Provider) => {
     const gen = ++fetchGenRef.current
-    setErr(''); setModelsRes(null); setTestRes(null); setTestTarget('')
+    setModelsErr(''); setModelsRes(null); setTestRes(null); setTestTarget('')
     setFetchingModels(true)
     try {
       const r = await api.post<FetchModelsResult>(`/api/providers/${p.id}/models`)
       if (gen === fetchGenRef.current) setModelsRes(r)
     } catch (e: any) {
-      if (gen === fetchGenRef.current) setErr(e.message)
+      if (gen === fetchGenRef.current) setModelsErr(e.message)
     } finally {
       if (gen === fetchGenRef.current) setFetchingModels(false)
     }
@@ -499,13 +506,13 @@ export default function Providers() {
   const testModelAvail = async (p: Provider, model: string) => {
     if (!model.trim()) return
     const gen = ++testGenRef.current
-    setErr(''); setTestRes(null)
+    setModelsErr(''); setTestRes(null)
     setTestingModel(true)
     try {
       const r = await api.post<TestModelResult>(`/api/providers/${p.id}/test_model`, { model })
       if (gen === testGenRef.current) setTestRes(r)
     } catch (e: any) {
-      if (gen === testGenRef.current) setErr(e.message)
+      if (gen === testGenRef.current) setModelsErr(e.message)
     } finally {
       if (gen === testGenRef.current) setTestingModel(false)
     }
@@ -532,7 +539,7 @@ export default function Providers() {
     if (!testTarget.trim()) return
     const gen = ++realGenRef.current
     const typeLabel = presetLabelOf(realPrompt)
-    setErr(''); setRealRes(null)
+    setModelsErr(''); setRealRes(null)
     setRealTesting(stream ? 'stream' : 'nonstream')
     try {
       if (stream) {
@@ -547,7 +554,7 @@ export default function Providers() {
         setRealHistory((h) => [{ typeLabel, res: r }, ...h].slice(0, 8))
       }
     } catch (e: any) {
-      if (gen === realGenRef.current) setErr(e.message)
+      if (gen === realGenRef.current) setModelsErr(e.message)
     } finally {
       if (gen === realGenRef.current) setRealTesting(null)
     }
@@ -594,8 +601,15 @@ export default function Providers() {
       })
       const ctype = res.headers.get('content-type') ?? ''
       if (!res.ok || !ctype.includes('text/event-stream')) {
-        // 渠道不存在/参数/凭据错误仍走普通 JSON 响应
+        // 切到 SSE 之前失败（渠道不存在/参数/凭据问题，或上游 4xx/5xx 在响应头阶段就失败）
+        // 后端仍回普通 JSON：code=0 的探测结果（含 ok=false）本身就是测试结果，
+        // 就地按失败结果展示；其余（鉴权/路由错误）才按请求错误抛出
         const data = await res.json().catch(() => ({}))
+        const payload = data?.data as TestModelResult | undefined
+        if (res.ok && data?.code === 0 && payload) {
+          settle(0, payload.latency_ms ?? 0, false, payload)
+          return
+        }
         throw new ApiError(res.status, data.code ?? res.status, data.data?.error ?? data.message ?? res.statusText)
       }
       const reader = res.body!.getReader()
@@ -652,7 +666,7 @@ export default function Providers() {
     streamAbortRef.current?.abort()
     streamAbortRef.current = null
     setModelsModal(null); setModelsRes(null); setTestRes(null); setTestTarget('')
-    setRealRes(null); setRealTesting(null); setRealHistory([])
+    setRealRes(null); setRealTesting(null); setRealHistory([]); setModelsErr(''); setErr('')
   }
 
   // 打开模型弹窗时自动拉取一次（依赖 id：同一渠道不重复触发）
@@ -700,6 +714,13 @@ export default function Providers() {
   // 禁用渠道沉底：启用的排前面（组内保持原有顺序），两组之间画一条分割线
   const sortedList = [...list].sort((a, b) => Number(b.enabled) - Number(a.enabled))
 
+  // 是否有弹窗打开：打开时错误一律显示在弹窗内（页面级横条在遮罩下面，等于看不见）
+  const modalOpen = !!(wiz || editForm || oauthFlow || modelsModal || quotaModal)
+  // 打开弹窗：清掉页面级错误，避免上一次的旧错误跑进新弹窗
+  const openModal = (open: () => void) => { setErr(''); open() }
+  // 关闭弹窗：错误随弹窗一起消失，不在页面上留幽灵提示
+  const closeModal = (close: () => void) => { setErr(''); close() }
+
   // WorkBuddy/CodeBuddy 渠道徽章：停用原因（警告色）优先，其次是低于「保留积分」阈值的积分；
   // 健康渠道返回 null（不占位，保持列表干净）。
   const wbBadgeFor = (p: Provider): { cls: string; text: string; title: string } | null => {
@@ -745,10 +766,10 @@ export default function Providers() {
               {t('providers.viewHealth')}
             </button>
           </div>
-          <button className="btn-primary" onClick={() => { resetProbe(); setWiz({ ...emptyWizard }) }}>{t('providers.addChannel')}</button>
+          <button className="btn-primary" onClick={() => openModal(() => { resetProbe(); setWiz({ ...emptyWizard }) })}>{t('providers.addChannel')}</button>
         </div>
       </div>
-      {err && <div className="mb-3 rounded-lg px-3 py-2 text-sm text-red-600 dark:text-red-400 err-well">{err}</div>}
+      {err && !modalOpen && <div className="mb-3 rounded-lg px-3 py-2 text-sm text-red-600 dark:text-red-400 err-well">{err}</div>}
 
       {view === 'health' ? (
         <ProvidersHealthView onChanged={load} />
@@ -792,7 +813,7 @@ export default function Providers() {
               </div>
               {/* 额度快照（openai codex 渠道；同步失败展示错误行） */}
               {quotaMap[p.id] && (
-                <QuotaCard snap={quotaMap[p.id]} onOpen={() => { resetProbe(); setQuotaModal(p) }} />
+                <QuotaCard snap={quotaMap[p.id]} onOpen={() => openModal(() => { resetProbe(); setQuotaModal(p) })} />
               )}
               <div className="truncate text-xs text-muted" title={p.base_url}>{p.base_url}</div>
               {p.model_map && Object.keys(p.model_map).length > 0 && (
@@ -804,11 +825,11 @@ export default function Providers() {
                 </div>
               )}
               <div className="mt-auto flex flex-wrap gap-1.5 text-xs">
-                <button className="btn-ghost" onClick={() => setModelsModal(p)}>{t('common.model')}</button>
+                <button className="btn-ghost" onClick={() => openModal(() => setModelsModal(p))}>{t('common.model')}</button>
                 {p.kind === 'oauth' && p.oauth_provider === 'openai' && (
-                  <button className="btn-ghost" onClick={() => { resetProbe(); setQuotaModal(p) }}>{t('providers.quotaBtn')}</button>
+                  <button className="btn-ghost" onClick={() => openModal(() => { resetProbe(); setQuotaModal(p) })}>{t('providers.quotaBtn')}</button>
                 )}
-                <button className="btn-ghost" onClick={() => { resetProbe(); setEditForm(toEditForm(p)) }}>{t('common.edit')}</button>
+                <button className="btn-ghost" onClick={() => openModal(() => { resetProbe(); setEditForm(toEditForm(p)) })}>{t('common.edit')}</button>
                 {p.kind === 'oauth' && p.authorized === false ? (
                   // 未完成授权：启停无意义（无凭据不参与转发），主操作是继续授权
                   <button className="btn-ghost" onClick={() => startOauthFlow(p)}>{t('providers.continueAuth')}</button>
@@ -836,7 +857,7 @@ export default function Providers() {
 
       {/* 添加向导弹窗 */}
       {wiz && (
-        <Modal onClose={() => { resetProbe(); setWiz(null) }} wide title={t('providers.addChannel')}>
+        <Modal onClose={() => closeModal(() => { resetProbe(); setWiz(null) })} wide title={t('providers.addChannel')} error={err}>
           {wiz.step === 1 && (
             <div className="grid grid-cols-2 gap-3">
               {/* 切换渠道类型：上个类型遗留的展示名/模型映射/探测结果一并清掉 */}
@@ -986,7 +1007,7 @@ export default function Providers() {
 
       {/* OAuth 授权弹窗 */}
       {oauthFlow && (
-        <Modal onClose={() => { stopPoll(); setOauthFlow(null) }} title={t('providers.oauth.title')}>
+        <Modal onClose={() => closeModal(() => { stopPoll(); setOauthFlow(null) })} title={t('providers.oauth.title')} error={err}>
           {oauthFlow.begin.user_code ? (
             <div className="space-y-4 text-center">
               <p className="text-sm text-muted">{t('providers.oauth.step1Device')}</p>
@@ -1051,7 +1072,7 @@ export default function Providers() {
 
       {/* 模型探测弹窗：拉取上游模型列表 + 测试单模型可用性 */}
       {modelsModal && (
-        <Modal onClose={closeModelsModal} wide title={t('providers.models.title', { name: modelsModal.name })}>
+        <Modal onClose={closeModelsModal} wide title={t('providers.models.title', { name: modelsModal.name })} error={modelsErr || err}>
           <div className="space-y-4">
             <div className="flex items-center justify-between gap-2">
               <p className="text-xs text-muted">{t('providers.models.subtitle')}</p>
@@ -1281,14 +1302,15 @@ export default function Providers() {
           p={quotaModal}
           snap={quotaMap[quotaModal.id]}
           refreshing={quotaRefreshing}
-          onClose={() => setQuotaModal(null)}
+          error={err}
+          onClose={() => closeModal(() => setQuotaModal(null))}
           onRefresh={() => refreshQuota(quotaModal)}
         />
       )}
 
       {/* 编辑弹窗（字段与新增向导保持一致；渠道类型/OAuth provider 定型后不可改） */}
       {editForm && (
-        <Modal onClose={() => { resetProbe(); setEditForm(null) }} title={t('providers.edit.title', { name: editForm.name })}>
+        <Modal onClose={() => closeModal(() => { resetProbe(); setEditForm(null) })} title={t('providers.edit.title', { name: editForm.name })} error={err}>
           <div className="space-y-4">
             <div>
               <label className="label">{t('providers.nameLabel')}</label>
@@ -1481,7 +1503,14 @@ function BillingMapEditor(props: {
   )
 }
 
-export function Modal({ title, children, onClose, wide }: { title: string; children: React.ReactNode; onClose: () => void; wide?: boolean }) {
+export function Modal({ title, children, onClose, wide, error }: {
+  title: string
+  children: React.ReactNode
+  onClose: () => void
+  wide?: boolean
+  /** 弹窗内的操作错误：渲染在面板内贴顶吸附，不会被遮罩压暗/遮挡 */
+  error?: string
+}) {
   return (
     <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
       {/* 限高滚动：超长内容（如上游原始错误）不撑破视口 */}
@@ -1490,6 +1519,12 @@ export function Modal({ title, children, onClose, wide }: { title: string; child
           <h3 className="font-semibold">{title}</h3>
           <button className="text-muted hover:opacity-80" onClick={onClose}>✕</button>
         </div>
+        {/* 错误横条贴顶吸附 + 不透明底色：面板滚动后仍压在视野内（页面级横条会被遮罩压暗） */}
+        {error && (
+          <div className="sticky top-0 z-10 -mx-4 mb-3 px-4 py-0.5" style={{ background: 'var(--panel-solid)' }}>
+            <div className="err-well rounded-lg px-3 py-2 text-sm text-red-600 dark:text-red-400">{error}</div>
+          </div>
+        )}
         {children}
       </div>
     </div>
@@ -1568,10 +1603,12 @@ function QuotaWindowDetail({ label, w }: { label: string; w: QuotaWindow }) {
 }
 
 // QuotaModal 额度详情弹窗：双窗口大进度条 + 重置次数 + credits + 模型级附加限额。
-function QuotaModal({ p, snap, refreshing, onClose, onRefresh }: {
+function QuotaModal({ p, snap, refreshing, error, onClose, onRefresh }: {
   p: Provider
   snap?: QuotaSnapshot
   refreshing: boolean
+  /** 刷新失败等弹窗内错误：交给 Modal 就地展示，不落页面级横条 */
+  error?: string
   onClose: () => void
   onRefresh: () => void
 }) {
@@ -1579,7 +1616,7 @@ function QuotaModal({ p, snap, refreshing, onClose, onRefresh }: {
   const d: QuotaData | undefined = snap?.status === 'ok' ? snap.data : undefined
   const rl = d?.rate_limit
   return (
-    <Modal onClose={onClose} title={t('providers.quota.title', { name: p.name })}>
+    <Modal onClose={onClose} title={t('providers.quota.title', { name: p.name })} error={error}>
       {!snap ? (
         <div className="space-y-3 text-center">
           <p className="text-sm text-muted">{t('providers.quota.neverSynced')}</p>

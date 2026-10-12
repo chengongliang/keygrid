@@ -454,8 +454,11 @@ export default function WorkBuddy() {
                       <td className="px-4 py-2.5"><span className="font-mono text-xs">{ch.account || '—'}</span></td>
                       <td className="px-4 py-2.5 text-right">
                         <div className="flex items-center justify-end gap-2">
+                          {/* 从未观测到积分（credits_at 为空）时显示「—」而不是 0：
+                              0 会被误读成「余额真的为 0」，而实际可能只是没有积分包
+                              （实测国际版账号 Accounts=null）或还没刷新过。 */}
                           <span className="tabular-nums" title={ch.credits_at ? fmtTime(ch.credits_at) : undefined}>
-                            {fmtNum(ch.credits)}
+                            {ch.credits_at ? fmtNum(ch.credits) : '—'}
                           </span>
                           <button
                             className="btn-ghost"

@@ -9,6 +9,7 @@ package workbuddy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -1116,8 +1117,24 @@ func probeServer(t *testing.T, status int, body string, secret string) *httptest
 			t.Error("缺少身分头 X-Domain")
 		}
 		b, _ := io.ReadAll(r.Body)
-		if string(b) != probeCreditsBody {
-			t.Errorf("请求体 = %s, want %s", b, probeCreditsBody)
+		// 请求体含动态时间区间，逐字段校验而不是整串比较
+		var sent map[string]any
+		if err := json.Unmarshal(b, &sent); err != nil {
+			t.Errorf("请求体不是 JSON: %s", b)
+		} else {
+			for k, want := range map[string]any{
+				"PageNumber": float64(1), "PageSize": float64(100), "ProductCode": "p_tcaca",
+			} {
+				if sent[k] != want {
+					t.Errorf("请求体 %s = %v, want %v", k, sent[k], want)
+				}
+			}
+			if _, ok := sent["PackageEndTimeRangeBegin"]; !ok {
+				t.Error("请求体缺少 PackageEndTimeRangeBegin")
+			}
+			if sent["PackageEndTimeRangeEnd"] != "2036-01-01 00:00:00" {
+				t.Errorf("PackageEndTimeRangeEnd = %v", sent["PackageEndTimeRangeEnd"])
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
@@ -1352,4 +1369,119 @@ func TestObserveSuccessKeepsParkedReasonWhenAlreadyEmpty(t *testing.T) {
 	if db.state.ParkedReason != "" {
 		t.Fatalf("不应写入原因: %q", db.state.ParkedReason)
 	}
+}
+
+// TestParseCreditsRealNestedShape 真实响应是「嵌套积分包数组」，不是标量余额。
+//
+// 用户实测报错：积分字段未识别: keys = [Response, code, data, msg, requestId]。
+// 参考实现读的是 data.Response.Data.Accounts[]，把每个包的剩余求和
+// （wb_accounts.py:1786-1794）。字段名取自参考实现的测试夹具
+// （tests/_test_expiring_priority.py:69-78）。
+func TestParseCreditsRealNestedShape(t *testing.T) {
+	pkg := func(remain any, extra map[string]any) map[string]any {
+		m := map[string]any{
+			"PackageName": "P", "PackageCode": "pkg",
+			"CycleCapacitySize": float64(100), "CycleCapacityRemain": remain,
+			"CycleCapacityUsed": float64(60),
+		}
+		for k, v := range extra {
+			m[k] = v
+		}
+		return m
+	}
+	wrap := func(accounts []any) string {
+		b, _ := json.Marshal(map[string]any{
+			"Response": map[string]any{"RequestId": "r"},
+			"code":     float64(0), "msg": "",
+			"data": map[string]any{
+				"Response": map[string]any{"Data": map[string]any{"Accounts": accounts}},
+				"code":     float64(0),
+			},
+		})
+		return string(b)
+	}
+
+	t.Run("两个包的剩余求和并保留两位", func(t *testing.T) {
+		got, err := parseCredits([]byte(wrap([]any{pkg(12.345, nil), pkg(7.655, nil)})))
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		if got != 20 {
+			t.Fatalf("credits = %v, want 20（12.345+7.655 四舍五入两位）", got)
+		}
+	})
+
+	t.Run("Precise 字段优先", func(t *testing.T) {
+		acc := pkg(float64(1), map[string]any{"CycleCapacityRemainPrecise": "42.5"})
+		got, err := parseCredits([]byte(wrap([]any{acc})))
+		if err != nil || got != 42.5 {
+			t.Fatalf("credits = %v err = %v, want 42.5", got, err)
+		}
+	})
+
+	t.Run("无 remain 时用 size-used 推导", func(t *testing.T) {
+		acc := map[string]any{"CycleCapacitySize": "100", "CycleCapacityUsed": "70"}
+		got, err := parseCredits([]byte(wrap([]any{acc})))
+		if err != nil || got != 30 {
+			t.Fatalf("credits = %v err = %v, want 30", got, err)
+		}
+	})
+
+	t.Run("负数剩余按 0 处理（推导路径）", func(t *testing.T) {
+		acc := map[string]any{"CycleCapacitySize": "10", "CycleCapacityUsed": "30"}
+		got, err := parseCredits([]byte(wrap([]any{acc})))
+		if err != nil || got != 0 {
+			t.Fatalf("credits = %v err = %v, want 0", got, err)
+		}
+	})
+
+	t.Run("Accounts 为空数组 → 哨兵而不是 0", func(t *testing.T) {
+		// 空列表表示「没有积分包」，不是「余额 0」：必须返回哨兵，
+		// 让上层保留上次观测值（实测国际版账号就是 Accounts=null）。
+		_, err := parseCredits([]byte(wrap([]any{})))
+		if !errors.Is(err, ErrCreditsUnavailable) {
+			t.Fatalf("err = %v, want ErrCreditsUnavailable", err)
+		}
+	})
+
+	t.Run("Accounts 为 null（实测国际版形状）→ 哨兵", func(t *testing.T) {
+		b, _ := json.Marshal(map[string]any{
+			"code": float64(0),
+			"data": map[string]any{
+				"Response": map[string]any{
+					"Data":           map[string]any{"Accounts": nil, "TotalCount": 0, "TotalDosage": 0},
+					"ProTrialStatus": 0, "RequestId": "r",
+				},
+			},
+			"msg": "", "requestId": "r",
+		})
+		_, err := parseCredits(b)
+		if !errors.Is(err, ErrCreditsUnavailable) {
+			t.Fatalf("err = %v, want ErrCreditsUnavailable", err)
+		}
+	})
+
+	t.Run("包字段全不认识 → 报错带键名", func(t *testing.T) {
+		_, err := parseCredits([]byte(wrap([]any{map[string]any{"Whatever": 1}})))
+		if err == nil || !strings.Contains(err.Error(), "Whatever") {
+			t.Fatalf("err = %v, want 含键名", err)
+		}
+	})
+
+	t.Run("Response 在顶层的变体也能解析", func(t *testing.T) {
+		b, _ := json.Marshal(map[string]any{
+			"Response": map[string]any{"Data": map[string]any{"Accounts": []any{pkg(float64(9), nil)}}},
+		})
+		got, err := parseCredits(b)
+		if err != nil || got != 9 {
+			t.Fatalf("credits = %v err = %v, want 9", got, err)
+		}
+	})
+
+	t.Run("标量形状仍然兼容", func(t *testing.T) {
+		got, err := parseCredits([]byte(`{"code":0,"data":{"remain":18.5}}`))
+		if err != nil || got != 18.5 {
+			t.Fatalf("credits = %v err = %v, want 18.5", got, err)
+		}
+	})
 }

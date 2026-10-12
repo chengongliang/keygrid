@@ -257,3 +257,40 @@ POST /v2/plugin/auth/state?platform=CLI  → HTTP 200
 3. **模型快照无需刷新**：`wb_catalog.py` 自 `6c2a663` 起未变，模型清单没有变化。
 4. 账号级 429 的「账号是否已验证」在我们的模型里没有直接等价物（参考是
    credit/free-package 查询成功与否），退避基准的映射方式见 `state.go` 注释。
+
+### A9 实测结论（2026-10-12，真实账号）
+
+用渠道已落库的凭据直连 `POST {billing}/v2/billing/meter/get-user-resource`
+（请求体同参考实现，含 `ProductCode=p_tcaca` 与有效期区间），两个区域形状如下。
+
+**国内版（有积分包）**：
+
+```json
+{"code":0,"msg":"...","requestId":"...",
+ "data":{"Response":{"Data":{"Accounts":[
+   {"PackageCode":"...","CycleCapacitySize":500,"CycleCapacityRemain":500,
+    "CycleCapacityUsed":0,"CapacityRemain":500,"CycleCapacityRemainPrecise":"...",
+    "CycleStartTime":"...","CycleEndTime":"...","DeductionEndTime":2042874643000,
+    "AccountAttributes":[...],"Status":0}]},
+   "ProTrialStatus":0,"RequestId":"..."}}}
+```
+
+→ 正确读法是 `data.Response.Data.Accounts[]`，把每个包的 `*Remain*` 求和
+（我们实测该账号聚合值 1335.00；字段优先级与参考实现 `wb_accounts.py:1567` 一致，
+`remain` 缺失时用 `size - used` 推导）。
+
+**国际版（无积分包）**：
+
+```json
+{"code":0,"data":{"Response":{"Data":{"Accounts":null,"TotalCount":0,"TotalDosage":0},
+  "ProTrialStatus":0,"RequestId":"..."}},"msg":"...","requestId":"..."}
+```
+
+→ `Accounts: null` **不是**「余额 0」，而是「该账号没有积分包维度」（国际版按订阅
+计费）。必须与「余额 0」区分：KeyGrid 返回哨兵 `ErrCreditsUnavailable`，保留上一次
+观测值（面板显示「—」而不是 0），积分任务如实记 `skipped`，手动刷新返回明确文案。
+
+**踩过的坑（记一笔）**：原实现只读标量键（`remain`/`balance`/…），真实响应里没有
+这些键，于是报「积分字段未识别: keys = [Response, code, data, msg, requestId]」；
+请求体也漏了 `PackageEndTimeRangeBegin/End`（参考实现始终带「现在 → 2036」区间）。
+两者都已修。

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -85,8 +86,21 @@ const (
 	upstreamCodeAccountRestricted = 11140
 )
 
-// probeCreditsBody 积分查询请求体（逐个字段照抄参考实现，不可改）。
-const probeCreditsBody = `{"PageNumber":1,"PageSize":100,"ProductCode":"p_tcaca","Status":[0,3]}`
+// probeCreditsBody 积分查询请求体（字段照抄参考实现 wb_accounts.py:1771-1778）。
+//
+// 必须带 PackageEndTimeRange*：参考实现对同一端点始终带上「现在 → 2036」的有效期
+// 区间，缺了它上游可能按默认区间过滤掉积分包（返回空 Accounts → 面板显示 0）。
+func probeCreditsBody(now time.Time) string {
+	b, _ := json.Marshal(map[string]any{
+		"PageNumber":               1,
+		"PageSize":                 100,
+		"ProductCode":              "p_tcaca",
+		"Status":                   []int{0, 3},
+		"PackageEndTimeRangeBegin": now.Format("2006-01-02 15:04:05"),
+		"PackageEndTimeRangeEnd":   "2036-01-01 00:00:00",
+	})
+	return string(b)
+}
 
 // ParkedError 渠道被准入过滤拦下（不是故障：换下一个候选即可）。
 type ParkedError struct {
@@ -536,7 +550,7 @@ func (r *Runtime) ProbeCredits(ctx context.Context, client *http.Client, p *mode
 
 	reqCtx, cancel := context.WithTimeout(ctx, creditsProbeTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, r.creditsEndpoint(realm), strings.NewReader(probeCreditsBody))
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, r.creditsEndpoint(realm), strings.NewReader(probeCreditsBody(r.now())))
 	if err != nil {
 		return 0, fmt.Errorf("workbuddy: build credits request: %w", err)
 	}
@@ -569,6 +583,10 @@ func (r *Runtime) ProbeCredits(ctx context.Context, client *http.Client, p *mode
 	}
 
 	now := r.now()
+	if errors.Is(err, ErrCreditsUnavailable) {
+		// 没有积分包：不写库（保留上次值），把哨兵交给调用方做「跳过」呈现。
+		return 0, err
+	}
 	if err := r.db().SetWorkbuddyCredits(p.UserID, p.ID, credits, now); err != nil {
 		return credits, fmt.Errorf("workbuddy: persist credits: %w", err)
 	}
@@ -781,6 +799,13 @@ func nextLocalDayStart(t time.Time) time.Time { return localDayStart(t).AddDate(
 
 // ---- 积分响应解析 ----
 
+// ErrCreditsUnavailable 上游没有返回任何积分包：这不是失败，而是「账号没有
+// 积分包维度的余额」（实测国际版账号就是 Accounts=null：它按订阅计费，不按积分包）。
+//
+// 语义要求：**不能**当成「余额 0」写入运行态 —— 那会让保留积分判定把渠道误停用，
+// 面板也会把「从未观测」显示成 0。调用方应保留上一次观测值。
+var ErrCreditsUnavailable = errors.New("上游未返回积分包（该账号可能按套餐计费，无积分包）")
+
 // creditValueKeys 积分候选字段（优先级从高到低，大小写不敏感）。
 //
 // 上游（commit 51549a3 / PR #286）的「总剩余 / 可用」两个维度并不是两套 JSON
@@ -808,10 +833,142 @@ func parseCredits(body []byte) (float64, error) {
 	if err := json.Unmarshal(body, &root); err != nil {
 		return 0, fmt.Errorf("workbuddy: credits response is not a JSON object: %w", err)
 	}
+	// 真实形状优先：积分是「积分包数组」，要把每个包的剩余求和，而不是读一个标量
+	// 字段（参考实现 wb_accounts.py:1786-1794 的 tot_remain）。
+	if accounts, ok := creditAccounts(root); ok {
+		if len(accounts) == 0 {
+			// Accounts=null/[] 表示「没有积分包」，不是「余额 0」：返回哨兵，
+			// 调用方保留上一次观测值（国际版实测就是 null）。
+			return 0, ErrCreditsUnavailable
+		}
+		var total float64
+		var parsed int
+		for _, raw := range accounts {
+			acc, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if v, ok := creditPackageRemain(acc); ok {
+				total += v
+				parsed++
+			}
+		}
+		if parsed == 0 {
+			return 0, fmt.Errorf("积分包字段未识别: 首个包的 keys = [%s]",
+				strings.Join(sortedKeys(accounts[0]), ", "))
+		}
+		return math.Round(total*100) / 100, nil
+	}
+	// 兼容形状：上游若直接给标量余额（历史/简化响应），按候选键取第一个。
 	if v, ok := pickCreditValue(root); ok {
 		return v, nil
 	}
-	return 0, fmt.Errorf("积分字段未识别: data keys = [%s]", strings.Join(creditKeyNames(root), ", "))
+	return 0, fmt.Errorf("积分字段未识别: keys = [%s]", strings.Join(creditKeyNames(root), ", "))
+}
+
+// creditAccounts 在响应里找积分包数组，按「由外到内」的候选路径逐个尝试。
+//
+// 实测响应顶层同时带 Tencent 风格的 Response 与 code/data/msg/requestId，
+// 参考实现读的是 data.Response.Data.Accounts（wb_accounts.py:1786）。
+//
+// 第二个返回值是「信封是否存在」：`Accounts: null`（实测国际版）同样算存在 ——
+// 那是「没有积分包」，不是「字段没找到」，两者的处理完全不同（前者哨兵、后者报错）。
+func creditAccounts(root map[string]any) ([]any, bool) {
+	paths := [][]string{
+		{"data", "Response", "Data", "Accounts"},
+		{"Response", "Data", "Accounts"},
+		{"data", "Data", "Accounts"},
+		{"data", "Accounts"},
+	}
+	for _, path := range paths {
+		arr, present := digAccounts(root, path)
+		if present {
+			return arr, true
+		}
+	}
+	return nil, false
+}
+
+// digAccounts 沿路径取积分包数组：路径存在时 present=true（值为 null 时 arr 为 nil）。
+func digAccounts(root map[string]any, path []string) (arr []any, present bool) {
+	var cur any = root
+	for _, key := range path {
+		m, ok := cur.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		next, ok := lookupFold(m, key)
+		if !ok {
+			return nil, false
+		}
+		cur = next
+	}
+	if cur == nil {
+		return nil, true // Accounts: null —— 路径存在但没有包
+	}
+	list, ok := cur.([]any)
+	if !ok {
+		return nil, false
+	}
+	return list, true
+}
+
+// creditPackageRemain 单个积分包的剩余额。
+//
+// 字段优先级与参考实现一致（wb_accounts.py:1567）：先取 remain 类字段；
+// 都没有时用 size - used 推导（wb_accounts.py:1570-1573）。
+func creditPackageRemain(acc map[string]any) (float64, bool) {
+	if v, ok := firstNumber(acc, "CycleCapacityRemainPrecise", "CycleCapacityRemain",
+		"CapacityRemainPrecise", "CapacityRemain"); ok {
+		return v, true
+	}
+	size, okSize := firstNumber(acc, "CycleCapacitySizePrecise", "CycleCapacitySize",
+		"CapacitySizePrecise", "CapacitySize")
+	used, okUsed := firstNumber(acc, "CycleCapacityUsedPrecise", "CycleCapacityUsed",
+		"CapacityUsedPrecise", "CapacityUsed")
+	if okSize && okUsed {
+		return math.Max(0, size-used), true
+	}
+	return 0, false
+}
+
+// firstNumber 按给定键序取第一个可解析为数值的字段（大小写不敏感）。
+func firstNumber(m map[string]any, keys ...string) (float64, bool) {
+	for _, want := range keys {
+		if v, ok := lookupFold(m, want); ok {
+			if f, ok := toFloat(v); ok {
+				return f, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// lookupFold 大小写不敏感地取 map 键。
+func lookupFold(m map[string]any, key string) (any, bool) {
+	if v, ok := m[key]; ok {
+		return v, true
+	}
+	for k, v := range m {
+		if strings.EqualFold(k, key) {
+			return v, true
+		}
+	}
+	return nil, false
+}
+
+// sortedKeys 取 map 键名（排序，只有键名没有值，可用于错误摘要）。
+func sortedKeys(v any) []string {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, len(m))
+	for k := range m {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // pickCreditValue 先在 data 对象内找，再在顶层找。

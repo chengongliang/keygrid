@@ -906,6 +906,11 @@ func runCreditsJob(ctx context.Context, jc *JobContext) (string, string) {
 		return jobStatusFailed, "运行态未接线（缺少 Op）"
 	}
 	if _, err := jc.Runtime.ProbeCredits(ctx, jc.httpClient(), jc.Provider, jc.Tok); err != nil {
+		// 没有积分包（实测国际版 Accounts=null）不是失败：如实记为 skipped，
+		// 免得面板天天报错，也避免把「无积分维度」误当成渠道故障。
+		if errors.Is(err, ErrCreditsUnavailable) {
+			return jobStatusSkipped, "该账号无积分包（上游未返回 Accounts）"
+		}
 		// ProbeCredits 的错误只含状态码与结构化上游字段，截断后直接落库。
 		return jobStatusFailed, truncateRunes(err.Error(), jobCreditsErrLen)
 	}

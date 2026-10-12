@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -316,6 +317,11 @@ func (h *WorkbuddyHandler) RefreshCredits(w http.ResponseWriter, r *http.Request
 	}
 	credits, err := h.Runtime.ProbeCredits(r.Context(), h.httpClient(), p, tok)
 	if err != nil {
+		// 没有积分包不是错误：明确告知而不是报 502（国际版账号实测如此）。
+		if errors.Is(err, workbuddy.ErrCreditsUnavailable) {
+			resp.BadRequest(w, "该账号没有积分包（按套餐计费），积分维度不适用")
+			return
+		}
 		// 上游错误摘要已由 ProbeCredits 裁剪（无正文、无 token），可安全回传
 		resp.BadGateway(w, "查询积分失败: "+err.Error())
 		return

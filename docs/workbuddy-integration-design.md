@@ -587,7 +587,7 @@ if err := workbuddy.Admit(cand.provider, cand.upModel, wbDeps); err != nil {
 
 - [x] `workbuddy_settings` / `workbuddy_channel_state` / `workbuddy_job_runs` 三表 + `op` 方法（全部带 user_id）
 - [x] `Admit` + 全 parked 的 429/Retry-After；日 token 聚合；保留积分；模型冷却；`Observe`（69 项单测，无需 PG/Redis）
-- [x] `ProbeCredits` + 手动刷新 + 15min 缓存；接线点 7、10（响应形状待 P0 探针确认）
+- [x] `ProbeCredits` + 手动刷新 + 15min 缓存；接线点 7、10（**A9 已实测**：包数组求和 + 无积分包哨兵，见上游事实记录）
 - [x] 前端：WorkBuddy 页（设置 / 运行态 / 任务开关 / 执行日志）+ i18n 双语言 + 图标复用（渠道徽章留待 P2 收尾）
 - **验收（已完成的部分）**：parked 渠道被跳过并 fallback 生效（三入口实测）；跨用户读不到运行态（真库隔离实测：用户 B 拿不到用户 A 的渠道，404）；`make test` + `npx tsc --noEmit` 全绿
 
@@ -648,7 +648,8 @@ mock 上游现按真实失败模式实现 `POST /v2/chat/completions`：缺 `Aut
 | 任务失败 | 释放当日幂等锁允许当天重试（当天积分不因一次抖动丢掉），但当天最多 3 次；成功/skipped/parked 仍保留锁 |
 | 风控 403（`11140`） | 独立错误类：长期冷却 + 换号；内容审核 403 不冷却、原样透传 |
 | 账号级 429 | 无 `Retry-After` 时采用上游软退避基准（已验证 10 分钟 / 未验证 1 分钟）；有 `Retry-After` 仍以它为准 |
-| 保留积分 | 改看「可用」维度（总剩余 ≠ 可用） |
+| 保留积分 | 改看「可用」维度（总剩余 ≠ 可用）；响应是 `data.Response.Data.Accounts[]` 包数组求和 |
+| 无积分包账号 | 国际版实测 `Accounts: null`：按「无积分维度」处理，保留上次观测值（面板「—」），积分任务记 skipped 而不是失败 |
 | 请求归一化 | 新增 `stop` 字符串包裹、相邻 `tool_calls` 合并（顺序在工具结果重排之前）、缺省 `max_tokens` 按模型目录补齐 |
 | 出口代理 | 网页打卡五条腿共用代理客户端；框架层新增「勾了代理绝不允许回落默认客户端」 |
 | 企业版账号 | 无成长体系 → 三个 CN 任务直接 skipped（判定信号尚不完整，见上游事实记录） |
