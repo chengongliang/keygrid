@@ -294,3 +294,30 @@ POST /v2/plugin/auth/state?platform=CLI  → HTTP 200
 这些键，于是报「积分字段未识别: keys = [Response, code, data, msg, requestId]」；
 请求体也漏了 `PackageEndTimeRangeBegin/End`（参考实现始终带「现在 → 2036」区间）。
 两者都已修。
+
+### 11128 实测复现（2026-10-12，Claude Code 接入场景）
+
+用户把 KeyGrid 配到 Claude Code 后报：
+
+```
+upstream 400: {"code":11128,"msg":"Illegal API invocation from an unapproved channel", ...}
+```
+
+用同一账号同一条最小请求体对照实测（`deepseek-v4.1-flash`）：
+
+| 请求体 | 结果 |
+|---|---|
+| Claude Code 的 system 指纹原样（`You are Claude Code, Anthropic's official CLI for Claude` + `Main branch (...)` + `cc_entrypoint=…` + `x-anthropic-billing-header: …`） | **HTTP 400 / code 11128** |
+| 只把上面这几段指纹片段脱敏后（同一账号、同一模型） | **HTTP 200** |
+
+结论：
+1. **不是 UA 问题**。UA 侧我们本来就正确：WorkBuddy 渠道在 `ua_mode` 为空时用身分档位
+   自带的 UA 覆盖透传的客户端 UA（`relay/handler.go:444-451`）。
+2. **是请求体内容**：上游 WAF 扫描 `messages` 里的客户端特征文本。参考实现在
+   `build_upstream_body` 里**无条件**调用 `sanitize_messages`（wb_proxy.py:10789-10811），
+   我们此前把脱敏放在用户设置后面且默认 `off` —— 这就是分叉点。
+3. 因此把默认档位改为 **on**（`WORKBUDDY_SCRUB` 未设置 = on，用户显式写 off 才关），
+   与参考实现对齐；`shadow`/`off` 仍保留给"要看命中面/明确拒绝改写"的场景。
+4. 参考实现还有第二层保护 `PROMPT_DEGRADE`（收到 403 后把提示词降级为中性最小提示并
+   重试，直到当日 00:00 CST），我们**未移植**：它是"已经出事之后的兜底"，而第一层
+   （无条件脱敏）才是根因修复。若将来仍遇到未覆盖的指纹，再按需移植。

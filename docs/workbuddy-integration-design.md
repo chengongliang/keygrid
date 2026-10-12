@@ -414,10 +414,10 @@ POST  /workbuddy/jobs/{job}/run  body={provider_id?} → {results:[{provider_id,
 | 增强 | 对谁必要 | 默认 | 风险 |
 |---|---|---|---|
 | `X-Machine-ID`/`X-Session-ID` 稳定派生（`md5("{salt}:{uid}")` 取 32 位 hex，`wb_fingerprint.py:12-20`，注意该实现注释说 36 位、实际只取 32 位 hex） | 无硬失败证据，属多账号防风控关联 | **关** | 伪装设备身份；上游改算法即失效 |
-| WAF 指纹脱敏（清 `x-anthropic-billing-header:*`、`cc_*=*`、改写 `Sisyphus-Junior...`、`11128`→`11-128`） | 只有 Codex CLI / Claude Code 客户端需要 | **关** | **会改写用户 prompt 内容** |
+| WAF 指纹脱敏（清 `x-anthropic-billing-header:*`、`cc_*=*`、改写 `Sisyphus-Junior...`、`11128`→`11-128`） | Claude Code / Codex CLI 等客户端**必须**开：不脱敏上游直接 400/11128（2026-10-12 实测复现） | **开**（`WORKBUDDY_SCRUB` 未设置即 on，显式 off 才关） | **会改写用户 prompt 内容**（只改命中的指纹片段） |
 | `reasoning_content` 回填 | DeepSeek 多轮 + thinking | 与步骤 7 绑定 | 低 |
 
-开启脱敏时必须配套（缺一不合并）：① 页面上显著说明"消息内容可能被平台改写"；② 每次改写写 `audit_log`（事件 `workbuddy.scrub`，只记命中规则名与消息条数，**不记内容**）；③ `off/shadow/on` 三档，`shadow` 只统计不改写。
+默认开启且必须配套（缺一不合并）：① 页面上显著说明"消息内容可能被平台改写"；② 每次改写写 `audit_log`（事件 `workbuddy.scrub`，只记命中规则名与消息条数，**不记内容**）；③ `off/shadow/on` 三档，`shadow` 只统计不改写。
 
 `uid` 落库策略：`workbuddy_channel_state.AccountUID` 只存**前 8 位 + `…`** 用于展示与派生校验；指纹派生所需的完整 uid 从 `TokenSet.Extra["uid"]` 现取（凭据已加密落库），避免给"账号标识"再造一份明文副本。
 

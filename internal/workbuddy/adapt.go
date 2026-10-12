@@ -157,17 +157,23 @@ func HeaderOptFor() HeaderOpt {
 // scrubLogOnce 用户设置读取失败只告警一次：转发热路径不能因同一故障反复刷日志。
 var scrubLogOnce sync.Once
 
-// ScrubModeFor 返回该渠道当前生效的脱敏档位（用户设置优先，未设置跟随 WORKBUDDY_SCRUB，默认 off）。
+// ScrubModeFor 返回该渠道当前生效的脱敏档位（用户设置优先，未设置跟随 WORKBUDDY_SCRUB，默认 on）。
 //
-// 判定顺序：用户 settings.scrub_mode（非空）→ WORKBUDDY_SCRUB 环境默认 → off。
-// 任何读失败都回落到环境默认（与 Admit 同一 fail-open 原则：状态读不出来不能让
-// 转发受影响；同时"读不到设置"绝不能误开脱敏去改写用户内容）。nil runtime /
-// nil provider 一律 off。读设置走既有的 db() 测试接缝，单测无需真实 DB。
+// 判定顺序：用户 settings.scrub_mode（非空）→ WORKBUDDY_SCRUB 环境默认 → **on**。
+//
+// 为什么默认 on：参考实现（wb_proxy.py 的 build_upstream_body）**无条件**对每次出站
+// 请求做 sanitize_messages；它不是"可选增强"，而是 Claude Code / Codex CLI 这类客户端
+// 能用的前提。实测（2026-10-12，真实账号）：把 Claude Code 的 system 指纹原样发上去，
+// 上游直接 400 `{"code":11128,"msg":"Illegal API invocation from an unapproved channel"}`，
+// 同一条请求体只脱敏指纹片段后立刻 200。写 off 是显式放弃这条保护（用户自担）。
+//
+// 任何读失败都回落到环境默认（与 Admit 同一 fail-open 原则：状态读不出来不能让转发
+// 受影响）。nil runtime / nil provider 一律 off（没有渠道就无从判定）。
 func (r *Runtime) ScrubModeFor(p *model.Provider) string {
 	if r == nil || r.Op == nil || p == nil {
 		return ScrubOff
 	}
-	envDefault := ScrubModeOf(os.Getenv("WORKBUDDY_SCRUB"))
+	envDefault := scrubEnvDefault()
 	db := r.db()
 	if db == nil {
 		return envDefault
@@ -184,4 +190,15 @@ func (r *Runtime) ScrubModeFor(p *model.Provider) string {
 		return envDefault
 	}
 	return ScrubModeOf(settings.ScrubMode)
+}
+
+// scrubEnvDefault 环境变量给出的默认脱敏档位；未设置（或取值非法）时为 on。
+//
+// 单独抽出来是为了让「默认 on」只有一处定义：测试、文档、.env.example 都指向它。
+func scrubEnvDefault() string {
+	raw := strings.TrimSpace(os.Getenv("WORKBUDDY_SCRUB"))
+	if raw == "" {
+		return ScrubOn
+	}
+	return ScrubModeOf(raw)
 }

@@ -10,6 +10,7 @@ import (
 // scrub_mode_test.go ScrubModeFor 的档位来源优先级（设计 §3.4）。
 //
 // 契约：用户 settings.scrub_mode（非空）优先；空/未设置跟随 WORKBUDDY_SCRUB；
+// **环境未设置时默认 on**（对齐参考实现的无条件 sanitize：不脱敏会被上游判 11128）；
 // 读设置失败回落环境默认；未知值一律 off；nil runtime / nil provider 不 panic。
 // DB 能力复用 state_test.go 的 fakeDB 与 newTestRuntime（未导出接缝，无需真实 DB）。
 
@@ -31,7 +32,10 @@ func TestRuntimeScrubModeForPrecedence(t *testing.T) {
 		{"设置大小写与空格被归一", "off", &model.WorkbuddySetting{ScrubMode: " ON "}, nil, ScrubOn},
 		{"DB 错误回落环境默认", "shadow", nil, errors.New("db down"), ScrubShadow},
 		{"DB 错误且环境未知回落 off", "garbage", nil, errors.New("db down"), ScrubOff},
-		{"环境未设置且设置空 => off", "", &model.WorkbuddySetting{ScrubMode: ""}, nil, ScrubOff},
+		// 默认 on：参考实现无条件脱敏，Claude Code/Codex CLI 的指纹不脱敏会被判 11128
+		{"环境未设置且设置空 => on（默认）", "", &model.WorkbuddySetting{ScrubMode: ""}, nil, ScrubOn},
+		{"环境未设置且设置行缺失 => on（默认）", "", nil, nil, ScrubOn},
+		{"显式关闭仍然是关", "off", &model.WorkbuddySetting{ScrubMode: ""}, nil, ScrubOff},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

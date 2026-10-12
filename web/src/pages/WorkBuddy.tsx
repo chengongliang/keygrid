@@ -80,7 +80,8 @@ const toDraft = (s: WorkbuddySettings): SettingsDraft => ({
   reserve_credits: safeNum(s.reserve_credits),
   daily_token_limit: safeNum(s.daily_token_limit),
   product: s.product ?? 'workbuddy',
-  scrub_mode: s.scrub_mode ?? 'off',
+  // 空值 = 未表态：后端默认 on（对齐参考实现的无条件脱敏，否则 Claude Code 会被判 11128）
+  scrub_mode: s.scrub_mode || 'on',
   fingerprint: !!s.fingerprint,
 })
 
@@ -373,6 +374,7 @@ export default function WorkBuddy() {
               </select>
             </div>
           </div>
+          <p className="mt-1 text-xs text-muted">{t('workbuddy.scrubDefaultHint')}</p>
           {draft.scrub_mode === 'on' && (
             <div className="warn-well mt-3 flex items-start gap-2 rounded-lg px-3 py-2 text-xs" style={{ color: 'var(--text)' }}>
               <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />

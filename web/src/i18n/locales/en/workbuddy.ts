@@ -21,7 +21,9 @@ export default {
   productWorkbuddy: 'WorkBuddy desktop',
   productVscode: 'VS Code extension',
   productCli: 'CLI',
-  scrubMode: 'Scrub mode',
+  scrubMode: 'Scrub mode (on by default)',
+
+  scrubDefaultHint: 'On unless turned off. Fingerprint text from clients such as Claude Code or the Codex CLI makes the upstream reject the request as an unapproved channel (11128); scrubbing rewrites only the matched fragments. Turning it off gives up that protection.',
   scrubOff: 'Off',
   scrubShadow: 'Count only',
   scrubOn: 'Rewrite',
