@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/chengongliang/keygrid/internal/model"
+	"github.com/chengongliang/keygrid/internal/oauth"
 	"github.com/chengongliang/keygrid/internal/relay"
 	"github.com/chengongliang/keygrid/internal/workbuddy"
 )
@@ -230,5 +232,67 @@ func TestWorkBuddyModelsFallsBackToSnapshot(t *testing.T) {
 		if !found {
 			t.Fatalf("内嵌目录缺少 %s: %v", want, models)
 		}
+	}
+}
+
+// TestBuildUpstreamChatProbeReq_WorkBuddy 渠道探活的请求必须走 WorkBuddy 上游协议：
+// /v2/chat/completions + IDE 身分头 + 强制流式（否则用户实测会拿到
+// {"error_msg":"404 Route Not Found"} —— 通用路径打的是 /v1/chat/completions）。
+func TestBuildUpstreamChatProbeReq_WorkBuddy(t *testing.T) {
+	p := &model.Provider{ID: 1, Name: "codebuddy-cn", OAuthProvider: "codebuddy-cn", BaseURL: "https://copilot.tencent.com"}
+	tok := &oauth.TokenSet{AccessToken: "at-1", Extra: map[string]string{"uid": "uid-1"}}
+
+	req, err := buildUpstreamChatProbeReq(context.Background(), p, "at-1", "", "hy3", "ping", 16, false, tok)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if got, want := req.URL.String(), "https://copilot.tencent.com/v2/chat/completions"; got != want {
+		t.Fatalf("target = %q, want %q", got, want)
+	}
+	for _, h := range []string{"X-Ide-Type", "X-Ide-Name", "X-CodeBuddy-Request"} {
+		if req.Header.Get(h) == "" {
+			t.Fatalf("缺少身分头 %s", h)
+		}
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer at-1" {
+		t.Fatalf("Authorization = %q", got)
+	}
+	body, _ := io.ReadAll(req.Body)
+	var sent map[string]any
+	if err := json.Unmarshal(body, &sent); err != nil {
+		t.Fatalf("body: %v", err)
+	}
+	if sent["stream"] != true {
+		t.Fatalf("上游只接受流式，必须强制 stream=true: %v", sent["stream"])
+	}
+	if _, ok := sent["stream_options"]; !ok {
+		t.Fatalf("应带 stream_options.include_usage: %v", sent)
+	}
+}
+
+// TestProbeUpstreamChat_WorkBuddyNonStreamCollapses 上游强制流式时，
+// 非流式探活应在本地折叠 SSE 后给出内容，而不是报「解析失败」。
+func TestProbeUpstreamChat_WorkBuddyNonStreamCollapses(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/chat/completions" {
+			w.WriteHeader(404)
+			_, _ = w.Write([]byte(`{"error_msg":"404 Route Not Found"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"pong\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer up.Close()
+
+	p := &model.Provider{ID: 2, OAuthProvider: "workbuddy-intl", BaseURL: up.URL}
+	pr := probeUpstreamChat(context.Background(), up.Client(), p, "at-2", "", "deepseek-v4.1-flash", "ping", 16, false,
+		&oauth.TokenSet{AccessToken: "at-2"})
+	if pr.Status != 200 {
+		t.Fatalf("status = %d err = %q", pr.Status, pr.Err)
+	}
+	if pr.Content != "pong" {
+		t.Fatalf("content = %q（应折叠 SSE 得到 pong）err = %q", pr.Content, pr.Err)
 	}
 }

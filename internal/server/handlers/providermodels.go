@@ -420,7 +420,7 @@ func (h *TestHandler) TestModel(w http.ResponseWriter, r *http.Request) {
 		emit()
 		return
 	}
-	pr := probeUpstreamChat(r.Context(), client, p, secret, accountID, res.Model, prompt, maxTokens, req.Stream)
+	pr := probeUpstreamChat(r.Context(), client, p, secret, accountID, res.Model, prompt, maxTokens, req.Stream, h.workBuddyTokenSet(p))
 	res.Status = pr.Status
 	res.LatencyMs = pr.LatencyMs
 	if req.Stream {
@@ -471,7 +471,7 @@ func pickReasoning(parts ...string) string {
 // buildUpstreamChatProbeReq 构建上游探测 chat 请求（TestModel/TestModelStream 共用）：
 // api_key 渠道 POST {base_url}/v1/chat/completions；Codex 渠道把 chat 载荷转
 // Responses 协议后直发 base_url（上游强制流式，stream 参数仅影响无意义的客户端形态）。
-func buildUpstreamChatProbeReq(ctx context.Context, p *model.Provider, secret, accountID, model, prompt string, maxTokens int, stream bool) (*http.Request, error) {
+func buildUpstreamChatProbeReq(ctx context.Context, p *model.Provider, secret, accountID, model, prompt string, maxTokens int, stream bool, tok *oauth.TokenSet) (*http.Request, error) {
 	chatPayload, _ := json.Marshal(map[string]any{
 		"model":      model,
 		"max_tokens": maxTokens,
@@ -498,6 +498,18 @@ func buildUpstreamChatProbeReq(ctx context.Context, p *model.Provider, secret, a
 			target = relay.NormalizeCodexBaseURL(p.BaseURL)
 		}
 		payload = converted
+	} else if workbuddy.Enabled() && workbuddy.IsWorkBuddy(p) {
+		// WorkBuddy/CodeBuddy 的上游路径是 /v2/chat/completions 且必须带 IDE 身分头、
+		// 强制流式 —— 与转发链路同一套（relay/handler.go 的 WorkBuddy 分支）。
+		// 否则会打到 {base_url}/v1/chat/completions，上游回
+		// {"error_msg":"404 Route Not Found"}（用户实测）。
+		upModel := model
+		adapted, wbTarget, _, aerr := workbuddy.AdaptRequest(p, chatPayload, upModel, stream)
+		if aerr != nil {
+			return nil, aerr
+		}
+		target = wbTarget
+		payload = adapted
 	} else {
 		target = strings.TrimRight(p.BaseURL, "/") + "/v1/chat/completions"
 		payload = chatPayload
@@ -509,7 +521,24 @@ func buildUpstreamChatProbeReq(ctx context.Context, p *model.Provider, secret, a
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+secret)
-	if relay.IsXAIProvider(p) {
+	if workbuddy.Enabled() && workbuddy.IsWorkBuddy(p) {
+		if tok == nil {
+			tok = &oauth.TokenSet{}
+		}
+		if tok.AccessToken == "" {
+			tok = &oauth.TokenSet{AccessToken: secret, RefreshToken: tok.RefreshToken, Extra: tok.Extra}
+		}
+		hdr, herr := workbuddy.Headers(p, tok, workbuddy.HeaderOptFor())
+		if herr != nil {
+			return nil, herr
+		}
+		for k, vs := range hdr {
+			for _, v := range vs {
+				req.Header.Set(k, v)
+			}
+		}
+		req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+	} else if relay.IsXAIProvider(p) {
 		for k, vs := range relay.XAIUpstreamHeaders(secret, target, "") {
 			req.Header.Set(k, vs[0])
 		}
@@ -528,8 +557,8 @@ func buildUpstreamChatProbeReq(ctx context.Context, p *model.Provider, secret, a
 // 与 probeUpstream（TestProvider 轻量探活）不同：这里读取完整响应体以还原真实对话。
 // Codex 渠道：chat 请求 → Responses 协议转换后直发 base_url，SSE 聚合回读。
 // client 由调用方按渠道代理开关构建（probeClient）。
-func probeUpstreamChat(ctx context.Context, client *http.Client, p *model.Provider, secret, accountID, model, prompt string, maxTokens int, stream bool) chatProbe {
-	req, err := buildUpstreamChatProbeReq(ctx, p, secret, accountID, model, prompt, maxTokens, stream)
+func probeUpstreamChat(ctx context.Context, client *http.Client, p *model.Provider, secret, accountID, model, prompt string, maxTokens int, stream bool, tok *oauth.TokenSet) chatProbe {
+	req, err := buildUpstreamChatProbeReq(ctx, p, secret, accountID, model, prompt, maxTokens, stream, tok)
 	if err != nil {
 		return chatProbe{Err: err.Error()}
 	}
@@ -574,6 +603,13 @@ func probeUpstreamChat(ctx context.Context, client *http.Client, p *model.Provid
 	latency := time.Since(start).Milliseconds()
 	if err != nil {
 		return chatProbe{Status: respUp.StatusCode, LatencyMs: latency, Err: "read body: " + err.Error()}
+	}
+	// WorkBuddy 上游只接受流式：调用方要非流式结果时，本地把 SSE 折叠成
+	// 一份 chat.completion JSON，再走下面同一套解析（与转发链路一致）。
+	if workbuddy.Enabled() && workbuddy.IsWorkBuddy(p) {
+		if collapsed, ok := workbuddy.CollapseSSE(buf); ok {
+			buf = collapsed
+		}
 	}
 	var parsed struct {
 		Choices []struct {

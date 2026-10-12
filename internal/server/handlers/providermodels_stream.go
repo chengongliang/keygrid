@@ -119,7 +119,7 @@ func (h *TestHandler) TestModelStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	upReq, err := buildUpstreamChatProbeReq(r.Context(), p, secret, accountID, res.Model, prompt, maxTokens, true)
+	upReq, err := buildUpstreamChatProbeReq(r.Context(), p, secret, accountID, res.Model, prompt, maxTokens, true, h.workBuddyTokenSet(p))
 	if err != nil {
 		res.Error = err.Error()
 		emit()
