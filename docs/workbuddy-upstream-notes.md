@@ -70,6 +70,9 @@ CHECK     CASE                                                 STATUS  CODE    B
 | 6004 | 上游 token 窗口打满（限额） | 大请求、当日额度用尽 | 短期冷却该渠道；准入过滤优先换号 | [WBP] `apply_daily_token_limit` 相关 |
 | 12302 | 活动模块下线（banner） | 国际版活跃活动 | **不代表**打卡失败；不据此判定 | wb2a v1.6.9 changelog |
 | 12403 | `/v3/config` 未授权的 UA | 非桌面 UA 拉目录 | 退回窄端点/快照，不告警 | [WBP] `wb_proxy.py:1989` |
+'
+| 11140 | `request illegal` — 账号被风控限制（`displayMsg`: 账号存在异常行为，已被限制使用） | 触发风控的请求 | **HTTP 403**；冷却该渠道并换号（与「内容审核 403」区分：后者不冷却、降级后透传） | [WBA/WBP] 上游 `be4f9f8` (#288) |
+| 11148 | `tool_call_sequence_broken` — 工具调用序列形状不被接受 | 并发工具批次被拆成相邻多条 assistant 消息 | 归一化阶段合并相邻 `tool_calls` 后应消失 | [WBP] `merge_adjacent_tool_calls` |
 | 待补 | | | | |
 
 ---
@@ -211,3 +214,46 @@ POST /v2/plugin/auth/state?platform=CLI  → HTTP 200
   即「浏览器登录 WorkBuddy 页面」——没有设备码可填，KeyGrid 侧只能给链接 + 轮询；
 - A-auth-3：`code:10001` 属参数校验类错误（区别于 `11217` 的待授权、`11128` 的渠道指纹），
   以后遇到 10001 一律先查参数是否漏传。
+
+## 五、上游同步记录（v1.6.20 → v1.7.1）
+
+本次以参考仓库 `ardeyouxipianyi/workbuddy2api-hub` 的 `0ba3a29`（v1.7.1 之后）为基准，
+把上一次同步点 `6c2a663` 之后的**协议与任务语义**变化重新对齐。366 个提交里绝大多数是
+网关面板/用量看板/多账号管理，与本移植无关；下面是逐项结论。
+
+### 已同步（有代码变更）
+
+| 上游变更 | 我们改了什么 | 上游出处 |
+|---|---|---|
+| 签到已签到时上游返回 **HTTP 400 + code 10001** | `runCheckinJob` 把它按成功记（只认结构化 code/msg，不误判其它 400） | `0ba3a29` fix(checkin) |
+| 每日任务**失败不消耗当天机会** | 任务失败时释放当日幂等锁可重试，Meta 记当天失败次数，上限 3 次后保留锁 | `93e9f26` fix(daily_chat) |
+| `stop` 传字符串被上游判 400/11101 | 归一化：字符串包成单元素数组，空值/非法类型删字段 | `c3f263d` (#294) |
+| 并发工具批次被拆成相邻 assistant → 400/**11148** | 归一化新增「合并相邻 tool_calls」，且必须**先合并再重排**工具结果 | `merge_adjacent_tool_calls` |
+| 请求未带 `max_tokens` 时上游用模型默认值 | 归一化按模型目录的 `maxOutputTokens` 补默认（未知模型不补） | `model_default_max_output_tokens` |
+| 风控 **403 / code 11140** 必须换号并冷却 | 识别为独立错误类，冷却更久并换号；内容审核 403 保持原语义（不冷却） | `be4f9f8` (#288) |
+| 账号级 429 的软退避是 10 分钟（未验证账号 1 分钟） | 无 `Retry-After` 的账号级 429 采用上游的软退避基准，有 `Retry-After` 时仍以它为准 | `SOFT_RATE_BASE`/`SOFT_RATE_UNVERIFIED_BASE` |
+| 积分拆「总剩余 / 可用」，资源查询端点扩展 | 准入用的保留积分改看**可用**值；端点/字段按参考对齐 | `51549a3` (#286) + `wb_accounts.py` 资源段 |
+| 网页通道（ACP）在认证代理上固定 407 | 五条腿共用带代理的客户端；新增「勾了代理绝不允许回落默认客户端」的框架级不变量 | `a94eb84` (#279) |
+| 成长任务引擎：`auto` 任务无需接取且优先执行；进度轮询后再领奖；接取失败回传原因 | 状态机逐条对齐；企业版账号直接跳过；新增不可伪造任务（公众号关注）跳过；`first_buddy` 规格更新 + 猫猫旅行前先确保 Buddy | `wb_tasks.py` 大改（见日志） |
+
+### 有意不移植（属面板/多账号管理，不属本移植范围）
+
+- 用量看板：小时/分钟分层、剩余用量估算与「剩余优先调度」、缓存 token、总花费、延迟单位。
+- 账号管理：手动权重/备注、一键切换出站身分、签到记录看板、出口级退避开关。
+- 成长看板：连续登录 streak、抽奖次数、补签卡、档位状态（`fetch_growth_summary`/`lottery`/`tiers`）。
+- 网页面板：ZCode 客户端配置器、agents CLI 下发、更新检查卡片。
+- 提示词改写：`apply_prompt_mode` 与 `build_upstream_body` 里的系统提示注入 —— 与设计文档
+  §3.7「KeyGrid 不注入任何系统提示」的既有决策冲突，保持不移植（`PROMPT_DEGRADE` 的
+  403 降级窗口同样不移植）。
+- 性能优化：`has_fingerprint` 的字面量快路径（纯性能，行为等价，Go 侧不需要）。
+
+### 未对齐的缺口（记录在案）
+
+1. **企业版判定信号不全**：参考用登录返回的 `enterpriseId`，我们的 CN OAuth 未把
+   `enterpriseId` 落进 `TokenSet.Extra`，目前只能靠 JWT claim 判定（`tasks_cn.go` 里有
+   `TODO(上游 A-企业版)`）。要完整对齐需在 `codebuddy.go` 的 Resolve 里持久化该字段。
+2. **模型目录元数据**：我们只落模型 id，没有 `maxOutputTokens`/`reasoning` 等元数据，
+   所以「默认 max_tokens」用的是从参考静态目录抄来的 id→值表。目录带元数据后应替换。
+3. **模型快照无需刷新**：`wb_catalog.py` 自 `6c2a663` 起未变，模型清单没有变化。
+4. 账号级 429 的「账号是否已验证」在我们的模型里没有直接等价物（参考是
+   credit/free-package 查询成功与否），退避基准的映射方式见 `state.go` 注释。
