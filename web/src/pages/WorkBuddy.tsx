@@ -487,11 +487,16 @@ export default function WorkBuddy() {
                           <span className="text-xs text-muted">{t('workbuddy.none')}</span>
                         ) : (
                           <div className="flex flex-wrap gap-1">
-                            {cooldowns.map(([model, until]) => (
-                              <span key={model} className="badge-zinc font-mono" title={t('workbuddy.cooldownUntil', { model, time: fmtTime(until) })}>
-                                {model} · {fmtTime(until)}
-                              </span>
-                            ))}
+                            {cooldowns.map(([model, until]) => {
+                              // 通配键 "*" = 上游风控（403/11140）给的整条渠道冷却，
+                              // 不是某个模型 —— 直接展示 "*" 会让人看不懂。
+                              const label = model === '*' ? t('workbuddy.cooldownWholeChannel') : model
+                              return (
+                                <span key={model} className="badge-zinc font-mono" title={t('workbuddy.cooldownUntil', { model: label, time: fmtTime(until) })}>
+                                  {label} · {fmtTime(until)}
+                                </span>
+                              )
+                            })}
                           </div>
                         )}
                       </td>

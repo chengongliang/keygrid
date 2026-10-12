@@ -57,6 +57,7 @@ export default {
   parkReserve: 'Reserve credits',
   parkCooldown: 'Cooling down',
   parkCooldownUntil: 'Expected recovery at {{time}}',
+  cooldownWholeChannel: 'Whole channel (account risk control)',
   cooldownUntil: '{{model}} recovers at {{time}}',
 
   // ---- Providers page badge (same parked_reason vocabulary) ----

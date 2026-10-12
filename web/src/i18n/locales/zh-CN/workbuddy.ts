@@ -57,6 +57,7 @@ export default {
   parkReserve: '保留积分',
   parkCooldown: '冷却中',
   parkCooldownUntil: '预计恢复时间 {{time}}',
+  cooldownWholeChannel: '整条渠道（账号风控）',
   cooldownUntil: '{{model}} 恢复时间 {{time}}',
 
   // ---- 渠道页徽章（Providers 页复用同一套 parked_reason 词汇）----
