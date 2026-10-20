@@ -249,9 +249,8 @@ POST /v2/plugin/auth/state?platform=CLI  → HTTP 200
 
 ### 未对齐的缺口（记录在案）
 
-1. **企业版判定信号不全**：参考用登录返回的 `enterpriseId`，我们的 CN OAuth 未把
-   `enterpriseId` 落进 `TokenSet.Extra`，目前只能靠 JWT claim 判定（`tasks_cn.go` 里有
-   `TODO(上游 A-企业版)`）。要完整对齐需在 `codebuddy.go` 的 Resolve 里持久化该字段。
+1. **企业版判定信号不全**：此处为 v1.7.1 同步时的缺口，已在下方 v1.7.16 同步中补齐：
+   CN OAuth 将登录响应 `enterpriseId` 持久化为 `TokenSet.Extra["enterprise_id"]`，刷新后保留。
 2. **模型目录元数据**：我们只落模型 id，没有 `maxOutputTokens`/`reasoning` 等元数据，
    所以「默认 max_tokens」用的是从参考静态目录抄来的 id→值表。目录带元数据后应替换。
 3. **模型快照无需刷新**：`wb_catalog.py` 自 `6c2a663` 起未变，模型清单没有变化。
@@ -321,3 +320,62 @@ upstream 400: {"code":11128,"msg":"Illegal API invocation from an unapproved cha
 4. 参考实现还有第二层保护 `PROMPT_DEGRADE`（收到 403 后把提示词降级为中性最小提示并
    重试，直到当日 00:00 CST），我们**未移植**：它是"已经出事之后的兜底"，而第一层
    （无条件脱敏）才是根因修复。若将来仍遇到未覆盖的指纹，再按需移植。
+
+## 上游同步记录（2026-10-20，v1.7.1 → v1.7.16）
+
+参考基线：[ffdba8c9b4d75cd43d9d256142923a1bb6b704ce](https://github.com/ardeyouxipianyi/workbuddy2api-hub/commit/ffdba8c9b4d75cd43d9d256142923a1bb6b704ce)。
+本轮核对该提交下的 `docs/CHANGELOG.md`、`wb_identity.py`、`wb_accounts.py`、
+`wb_proxy.py`、`wb_tasks.py`，选取可直接映射到 KeyGrid 的上游协议修复。
+以下结论来自源码比对与本地 mock 回归，**不是使用真实账号对上游的实测结果**。
+
+### 已同步的功能
+
+| 上游变化 | KeyGrid 行为 | 代码位置 |
+|---|---|---|
+| 国内版 `WB_CN_CHAT_UPSTREAM` 改址（#465） | 默认及历史 `copilot.tencent.com` 渠道、模型目录、OAuth state/token/refresh、成长任务统一改址；保留自填的其它渠道域名与独立 OAuth 端点覆盖 | `internal/workbuddy/upstream/config.go`、`realm.go`、`internal/oauth/providers/codebuddy.go` |
+| 版本与 UA 收敛（#403，及 v1.7.14 身份对齐） | 国际桌面 5.8.4、内置 CLI 2.161.0；独立 CLI 2.168.2；VSCode 产品 4.12.39997873。认证与转发共用版本事实，国内桌面保持 5.5.6 | `internal/workbuddy/upstream/config.go`、`identity.go` |
+| 桌面会话头及请求 ID 关系 | 三档都带会话头；桌面/CLI 会话 ID 为带连字符 UUID，VSCode 为 32hex；请求/消息 ID 使用随机 UUIDv7，按产品档关联 root/request/message ID，避免同 uid 同纳秒重复 | `internal/workbuddy/identity.go` |
+| 账号身份不能跟着连接域名改变 | 优先使用授权保存的 `domain` 作为 `X-Domain`；CLI 补齐 purpose/type/runtime，个人/企业账号分别设置 private-data；VSCode 产品名改为 CodeBuddy | `internal/workbuddy/identity.go` |
+| 工具参数 Schema 规整（v1.7.14） | 无参工具补 object/properties，递归处理类型别名、required、items、definitions 与组合 Schema；兼容旧版 functions 和扁平工具；保留合法约束、strict 与 null default | `internal/workbuddy/pipeline.go` |
+| 历史工具 arguments 为对象导致 11101 | 将对象/数组参数编码为 JSON 字符串，已有字符串不改变，保留 Unicode 与 HTML 字符 | `internal/workbuddy/pipeline.go` |
+| 工具结果前插入消息导致 11148（#420） | user/system/developer 插入消息移到结果批次之后；任何新 assistant 消息都终止本批次，不跨轮次搬运工具结果 | `internal/workbuddy/pipeline.go` |
+| 11140 默认停止换号（#450） | 真实转发遇到结构化 HTTP 403/code 11140，记录失败和既有账号冷却后结束本次请求，不继续向后续渠道发送；普通内容审核 403 不受影响 | `internal/relay/handler.go`、`workbuddy_runtime.go` |
+| 企业版判定补齐 | CN OAuth 保存 realm/domain/uid/enterprise_id，刷新保留；成长任务可用登录元信息跳过企业账号，而非仅依赖 JWT | `internal/oauth/providers/codebuddy.go` |
+| 静态模型目录 | 国内版快照补入 `hy3`；国际版新增项均为已有过滤规则剔除的档位别名，不作为真实模型加入。逐项核对默认最大输出 tokens，已有取值无需调整 | `internal/workbuddy/snapshot/models_cn.json`、`catalog_test.go` |
+
+### 国内版连接问题的配置方法
+
+在部署环境中增加：
+
+```dotenv
+WB_CN_CHAT_UPSTREAM=https://www.workbuddy.cn
+```
+
+重启 KeyGrid 后生效，不需要批量修改已有渠道。空值或非法 URL 回落
+`https://copilot.tencent.com`；只接受 http(s) 根基址，不接受凭据、业务路径、查询参数与片段。
+国际版、计费/积分/签到域、自填其它域名的渠道不受此项影响；`X-Domain` 仍来自账号身份。
+已有 `CODEBUDDY_STATE_URL` / `CODEBUDDY_TOKEN_URL` / `CODEBUDDY_REFRESH_URL` 的显式配置优先。
+
+### 保留原有实现或暂未移植
+
+- 独立面板、部署脚本、定址 `/u/<ref>/` 路由、账号模型黑名单、价表和统计 UI 不直接搬入 KeyGrid；沿用本项目的渠道绑定、模型映射与用户隔离。
+- 上游按账号隔离 TCP/TLS 连接、原始头名保真与 gzip/SDK/trace 头全量仿真未移植；Go HTTP 栈和连接池仍按本项目现有实现工作。
+- 401 同请求刷新重试未新增；KeyGrid 保留既有提前刷新和请求时凭据刷新机制，需要另行覆盖锁内重读、单次刷新与流已提交的边界。
+- 上游 11140 区域级持久闸门未移植；本轮只停止当前请求的换号并保留既有账号级冷却，不新增可能跨用户互相影响的区域状态。
+- 实际 credit 回包扣减余额、网页打卡指数重试、免费模型回落、可配置排程和错峰执行暂未移植。
+- 不引入后台模型自动改写、积分付费回落、系统提示注入或默认关闭 Messages 入口，保持 KeyGrid 的既有协议契约。
+
+### 验证
+
+回归覆盖：改址合法性/覆盖优先级、OAuth 完整 state→poll→refresh 链路、企业元信息保留、
+HTTP 错误拒收、三档身份矩阵、固定时钟下 ID 唯一性、工具 Schema 幂等性与工具结果顺序、
+11140 停止条件及普通 403/429 的区分。
+
+```bash
+go test ./internal/workbuddy/... ./internal/oauth/providers ./internal/relay
+make test
+go test -race ./internal/workbuddy/... ./internal/oauth/providers ./internal/relay
+go vet ./...
+```
+
+本轮没有调用真实账号、执行付费模型请求或运行自动化打卡，也没有修改数据库结构或前端。

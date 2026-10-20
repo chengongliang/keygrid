@@ -56,7 +56,7 @@ func TestWorkBuddyBeginAndPoll(t *testing.T) {
 				r.Header.Get("Origin") != "https://www.workbuddy.ai" ||
 				r.Header.Get("X-Requested-With") != "XMLHttpRequest" ||
 				r.Header.Get("Accept") != "application/json, text/plain, */*" ||
-				!strings.Contains(r.Header.Get("User-Agent"), "WorkBuddy/5.5.2") {
+				!strings.Contains(r.Header.Get("User-Agent"), "WorkBuddy/5.8.4") {
 				w.WriteHeader(403)
 				return
 			}
@@ -150,7 +150,7 @@ func TestWorkBuddyBeginAndPoll(t *testing.T) {
 	// token 轮询用授权面头部（billing UA + 全 Accept）；参考实现在这一步
 	// **不带** X-CodeBuddy-Request（wb_accounts.py:1239-1247），故这里断言的是
 	// 授权面那组头，而不是 chat 面的身份头。
-	if ua := pollHeaders.Get("User-Agent"); !strings.Contains(ua, "WorkBuddy/5.5.2") {
+	if ua := pollHeaders.Get("User-Agent"); !strings.Contains(ua, "WorkBuddy/5.8.4") {
 		t.Fatalf("poll UA = %q, want billing UA", ua)
 	}
 	if acc := pollHeaders.Get("Accept"); acc != "application/json, text/plain, */*" {

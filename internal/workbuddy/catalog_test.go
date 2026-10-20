@@ -182,6 +182,25 @@ func TestFetchModelsSnapshotFallbackRealmAware(t *testing.T) {
 }
 
 // TestFilterModelIDs 过滤规则：档位别名 / auto / default-<版本> / -sg / -x / -f 优先。
+func TestSnapshotModelsUpstreamSync(t *testing.T) {
+	found := false
+	for _, identifier := range SnapshotModels(RealmCN) {
+		if identifier == "hy3" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("国内版快照应包含上游新增的 hy3")
+	}
+	for _, realm := range []Realm{RealmCN, RealmIntl} {
+		for _, identifier := range SnapshotModels(realm) {
+			if _, alias := catalogTierAliases[identifier]; alias {
+				t.Fatalf("快照不应暴露档位别名: %s/%s", realm, identifier)
+			}
+		}
+	}
+}
+
 func TestFilterModelIDs(t *testing.T) {
 	cases := []struct {
 		name string

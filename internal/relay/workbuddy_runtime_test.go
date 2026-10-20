@@ -1,10 +1,36 @@
 package relay
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
 )
+
+func TestStopWorkbuddyFailover(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		err    error
+		want   bool
+	}{
+		{"账号限制", 403, &UpstreamError{Status: 403, Body: `{"code":11140,"msg":"request illegal"}`}, true},
+		{"嵌套错误码", 403, &UpstreamError{Status: 403, Body: `{"error":{"code":"11140"}}`}, true},
+		{"包装错误", 403, fmt.Errorf("wrapped: %w", &UpstreamError{Status: 403, Body: `{"code":11140}`}), true},
+		{"内容审核", 403, &UpstreamError{Status: 403, Body: `{"code":10001}`}, false},
+		{"错误文本含数字", 403, &UpstreamError{Status: 403, Body: `{"message":"11140"}`}, false},
+		{"中间层 HTML", 403, &UpstreamError{Status: 403, Body: `<html>11140</html>`}, false},
+		{"限流", 429, &UpstreamError{Status: 429, Body: `{"code":11140}`}, false},
+		{"无错误", 403, nil, false},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := stopWorkbuddyFailover(testCase.status, testCase.err); got != testCase.want {
+				t.Fatalf("stopWorkbuddyFailover() = %v, want %v", got, testCase.want)
+			}
+		})
+	}
+}
 
 // workbuddy_runtime_test.go 上游错误 → 运行态事件 的抽取逻辑。
 //

@@ -29,6 +29,7 @@ import (
 	"strings"
 
 	"github.com/chengongliang/keygrid/internal/model"
+	"github.com/chengongliang/keygrid/internal/workbuddy/upstream"
 )
 
 // realm.go 区域识别与端点常量 —— 本包唯一的上游事实来源。
@@ -57,7 +58,7 @@ const (
 // 上游端点与路径常量。
 const (
 	intlChatBase    = "https://www.workbuddy.ai"
-	cnChatBase      = "https://copilot.tencent.com"
+	cnChatBase      = upstream.CNChatBaseDefault
 	intlBillingBase = "https://www.workbuddy.ai"
 	cnBillingBase   = "https://www.codebuddy.cn"
 
@@ -142,6 +143,9 @@ func ChatBase(p *model.Provider) (string, error) {
 		return "", ErrNotWorkBuddy
 	}
 	if base := normalizeBase(p.BaseURL); base != "" {
+		if realm == RealmCN && base == cnChatBase {
+			return defaultChatBase(realm), nil
+		}
 		return base, nil
 	}
 	return defaultChatBase(realm), nil
@@ -219,7 +223,7 @@ func WebBase(realm Realm) (string, error) {
 // defaultChatBase 区域默认 chat 基址。
 func defaultChatBase(realm Realm) string {
 	if realm == RealmCN {
-		return cnChatBase
+		return upstream.CNChatBase()
 	}
 	return intlChatBase
 }

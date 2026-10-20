@@ -60,6 +60,7 @@ func NormalizeRequest(p *model.Provider, upModel string, body []byte, forceStrea
 	//    最后对称裁剪孤儿。顺序有语义：merge 必须早于 repack，否则 repack 看到的是
 	//    半截批次。WBP:2477 / WBP:2546 / WBP:10071（merge 为本轮新增）
 	if msgs, ok := obj["messages"].([]any); ok {
+		normToolArguments(msgs)
 		msgs, _ = mergeAdjacentToolCalls(msgs)
 		msgs, _ = toolRepackResults(msgs)
 		msgs, _ = toolCleanupOrphans(msgs)
@@ -104,7 +105,8 @@ var normFastProbes = [][]byte{
 	[]byte("max_completion_tokens"), []byte("thinking"), []byte("reasoning"),
 	[]byte(`"tool"`), []byte("tool_calls"), []byte("deepseek"),
 	[]byte(`"stop"`), // stop 需要用带引号的键探测：普通 prompt 文本里的 stop 不该触发
-	[]byte(`"_`),     // 额外的 tool_calls/deepseek/"_ 是保守保险：漏掉它们会让规则
+	[]byte(`"functions"`),
+	[]byte(`"_`), // 额外的 tool_calls/deepseek/"_ 是保守保险：漏掉它们会让规则
 	// 3 / 7 / 1 在无 upModel 时被快路径跳过；宁可多走一次解析也不能漏改写。
 }
 
@@ -260,11 +262,7 @@ func toolRepackResults(messages []any) ([]any, bool) {
 				i++
 				continue
 			}
-			if len(results) == 0 {
-				break // 闯入者只在批次结果之后才被搬走
-			}
-			// 下一个 assistant.tool_calls 开启新批次，交回外层循环。
-			if role == "assistant" && len(normSlice(mm["tool_calls"])) > 0 {
+			if role == "assistant" {
 				break
 			}
 			between = append(between, mm)
@@ -443,11 +441,23 @@ func normStop(obj map[string]any) {
 	delete(obj, "stop")
 }
 
-// normTools 把「顶层 name」形态的 function 工具包成 function schema；非 dict
-// 条目丢弃，其余原样透传。WBP:2705-2731。
+// normTools 兼容旧版 functions 与扁平工具声明，并修复上游拒绝的参数 Schema。
 func normTools(obj map[string]any) {
+	if functions, exists := obj["functions"]; exists {
+		if _, hasTools := obj["tools"]; !hasTools {
+			var tools []any
+			for _, raw := range normSlice(functions) {
+				if function := normMap(raw); function != nil {
+					tools = append(tools, map[string]any{"type": "function", "function": function})
+				}
+			}
+			obj["tools"] = tools
+			delete(obj, "functions")
+		}
+	}
 	tools := normSlice(obj["tools"])
 	if len(tools) == 0 {
+		delete(obj, "tools")
 		return
 	}
 	norm := make([]any, 0, len(tools))
@@ -456,7 +466,7 @@ func normTools(obj map[string]any) {
 		if tm == nil {
 			continue
 		}
-		if _, hasName := tm["name"]; hasName && tm["type"] == "function" {
+		if _, hasName := tm["name"]; hasName {
 			if _, hasFn := tm["function"]; !hasFn {
 				params := tm["parameters"]
 				if params == nil {
@@ -469,13 +479,153 @@ func normTools(obj map[string]any) {
 				if strict, ok := tm["strict"]; ok {
 					fn["strict"] = strict
 				}
+				normToolParameters(fn)
 				norm = append(norm, map[string]any{"type": "function", "function": fn})
 				continue
 			}
 		}
+		if function := normMap(tm["function"]); function != nil {
+			tm["type"] = "function"
+			normToolParameters(function)
+		}
 		norm = append(norm, t)
 	}
-	obj["tools"] = norm
+	if len(norm) > 0 {
+		obj["tools"] = norm
+	} else {
+		delete(obj, "tools")
+	}
+}
+
+func normToolArguments(messages []any) {
+	for _, raw := range messages {
+		message := normMap(raw)
+		if message["role"] != "assistant" {
+			continue
+		}
+		for _, rawCall := range normSlice(message["tool_calls"]) {
+			function := normMap(normMap(rawCall)["function"])
+			switch arguments := function["arguments"].(type) {
+			case map[string]any, []any:
+				var encoded bytes.Buffer
+				encoder := json.NewEncoder(&encoded)
+				encoder.SetEscapeHTML(false)
+				if encoder.Encode(arguments) == nil {
+					function["arguments"] = strings.TrimSuffix(encoded.String(), "\n")
+				}
+			}
+		}
+	}
+}
+
+func normToolParameters(function map[string]any) {
+	parameters := normMap(function["parameters"])
+	if parameters == nil {
+		parameters = map[string]any{}
+	}
+	parameters["type"] = "object"
+	if normMap(parameters["properties"]) == nil {
+		parameters["properties"] = map[string]any{}
+	}
+	normSchema(parameters)
+	function["parameters"] = parameters
+}
+
+func normSchema(schema map[string]any) {
+	for _, key := range []string{"description", "title", "format", "pattern", "items"} {
+		if schema[key] == nil {
+			delete(schema, key)
+		}
+	}
+	if typeName, ok := schema["type"].(string); ok {
+		typeName = normSchemaType(typeName)
+		switch typeName {
+		case "string", "number", "integer", "boolean", "array", "object", "null":
+			schema["type"] = typeName
+		default:
+			delete(schema, "type")
+			if _, exists := schema["properties"]; exists {
+				schema["type"] = "object"
+			} else if _, exists := schema["items"]; exists {
+				schema["type"] = "array"
+			}
+		}
+	} else if types, ok := schema["type"].([]any); ok {
+		for index, raw := range types {
+			if typeName, ok := raw.(string); ok {
+				types[index] = normSchemaType(typeName)
+			}
+		}
+	}
+	if _, exists := schema["properties"]; exists && schema["type"] == nil {
+		schema["type"] = "object"
+	}
+	if schema["type"] == "object" && normMap(schema["properties"]) == nil {
+		schema["properties"] = map[string]any{}
+	}
+	if required, exists := schema["required"]; exists {
+		var cleaned []any
+		if name, ok := required.(string); ok {
+			required = []any{strings.TrimSpace(name)}
+		}
+		for _, raw := range normSlice(required) {
+			if name, ok := raw.(string); ok && strings.TrimSpace(name) != "" {
+				cleaned = append(cleaned, name)
+			}
+		}
+		if len(cleaned) == 0 {
+			delete(schema, "required")
+		} else {
+			schema["required"] = cleaned
+		}
+	}
+	if items, ok := schema["items"].([]any); ok {
+		first := map[string]any{"type": "string"}
+		for _, raw := range items {
+			if item := normMap(raw); item != nil {
+				first = item
+				break
+			}
+		}
+		schema["items"] = first
+	}
+	if items := normMap(schema["items"]); items != nil {
+		normSchema(items)
+	}
+	for _, key := range []string{"properties", "$defs", "definitions"} {
+		for _, raw := range normMap(schema[key]) {
+			if nested := normMap(raw); nested != nil {
+				normSchema(nested)
+			}
+		}
+	}
+	for _, key := range []string{"anyOf", "oneOf", "allOf"} {
+		for _, raw := range normSlice(schema[key]) {
+			if nested := normMap(raw); nested != nil {
+				normSchema(nested)
+			}
+		}
+	}
+}
+
+func normSchemaType(typeName string) string {
+	typeName = strings.ToLower(strings.TrimSpace(typeName))
+	switch typeName {
+	case "str", "text":
+		return "string"
+	case "int":
+		return "integer"
+	case "bool":
+		return "boolean"
+	case "dict":
+		return "object"
+	case "list":
+		return "array"
+	case "float":
+		return "number"
+	default:
+		return typeName
+	}
 }
 
 // normDeepSeekThinking 注入 DeepSeek thinking/effort 并返回 thinking 是否 enabled。

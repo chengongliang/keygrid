@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -133,6 +134,10 @@ func retryAfterFrom(err error) time.Duration {
 		return ue.RetryAfter
 	}
 	return 0
+}
+
+func stopWorkbuddyFailover(status int, err error) bool {
+	return status == http.StatusForbidden && upstreamCodeFromError(err) == 11140
 }
 
 // upstreamCodeFromError 从上游错误体里提取业务错误码（如 WorkBuddy 的 6004 限额）。

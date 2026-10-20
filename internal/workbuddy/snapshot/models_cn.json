@@ -1,8 +1,9 @@
 {
   "realm": "cn",
-  "capturedAt": "2026-02-14",
-  "source": "wb2a wb_catalog.py",
+  "capturedAt": "2026-10-20",
+  "source": "workbuddy2api-hub wb_catalog.py @ ffdba8c9 (reference snapshot)",
   "models": [
+    "hy3",
     "hy3-x",
     "hy4-preview",
     "hy4-preview-dev",

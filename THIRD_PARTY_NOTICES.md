@@ -73,7 +73,7 @@ SOFTWARE.
   - `internal/workbuddy/`：WorkBuddy / CodeBuddy 上游端点与路径、IDE 身分头与 UA 矩阵、
     请求体归一化规则（tools/tool_choice/max_tokens/thinking/reasoning 回填）、
     模型目录回落顺序与过滤规则、积分/签到等接口形态
-  - `internal/oauth/providers/workbuddy.go`：OAuth state 轮询与 `X-Refresh-Token` 续期协议
+  - `internal/oauth/providers/workbuddy.go`、`internal/oauth/providers/codebuddy.go`：OAuth state 轮询、账号元信息与 `X-Refresh-Token` 续期协议
   - `docs/workbuddy-integration-design.md`、`docs/workbuddy-upstream-notes.md`：上游事实记录
   - `scripts/probe_workbuddy.sh`：端点探针（自研）
 - 说明：原项目为单租户 Python 网关，KeyGrid 仅移植其上游协议知识与归一化规则，

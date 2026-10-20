@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/chengongliang/keygrid/internal/oauth"
+	"github.com/chengongliang/keygrid/internal/workbuddy/upstream"
 )
 
 // codebuddy.go port of 9router src/lib/oauth/providers/codebuddy-cn.js
@@ -24,10 +25,10 @@ import (
 // Refresh：POST /v2/plugin/auth/token/refresh，refresh_token 放在 X-Refresh-Token
 // 请求头（不是 form body），body "{}"，响应 {code:0, data:{accessToken, refreshToken, expiresIn}}。
 var (
-	codebuddyStateURL   = envOr("CODEBUDDY_STATE_URL", "https://copilot.tencent.com/v2/plugin/auth/state")
-	codebuddyTokenURL   = envOr("CODEBUDDY_TOKEN_URL", "https://copilot.tencent.com/v2/plugin/auth/token")
-	codebuddyRefreshURL = envOr("CODEBUDDY_REFRESH_URL", "https://copilot.tencent.com/v2/plugin/auth/token/refresh")
-	codebuddyUA         = "CLI/2.63.2 CodeBuddy/2.63.2"
+	codebuddyStateURL   = envOr("CODEBUDDY_STATE_URL", upstream.CNChatBaseDefault+"/v2/plugin/auth/state")
+	codebuddyTokenURL   = envOr("CODEBUDDY_TOKEN_URL", upstream.CNChatBaseDefault+"/v2/plugin/auth/token")
+	codebuddyRefreshURL = envOr("CODEBUDDY_REFRESH_URL", upstream.CNChatBaseDefault+"/v2/plugin/auth/token/refresh")
+	codebuddyUA         = upstream.CLIUA
 )
 
 // codebuddyHeaders CodeBuddy 特征请求头（官方 CLI 同款）。
@@ -51,7 +52,7 @@ func (CodeBuddyCN) Flow() oauth.FlowType { return oauth.FlowDeviceCode }
 
 // BeginAuth POST state 拿 {state, authUrl}（9router requestDeviceCode 1:1）。
 func (CodeBuddyCN) BeginAuth(ctx context.Context, cb oauth.Callbacks, _ string) (*oauth.BeginResult, map[string]string, error) {
-	u := codebuddyStateURL + "?" + url.Values{"platform": {"CLI"}}.Encode()
+	u := upstream.CNEndpoint(codebuddyStateURL, "CODEBUDDY_STATE_URL") + "?" + url.Values{"platform": {"CLI"}}.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, strings.NewReader("{}"))
 	if err != nil {
 		return nil, nil, err
@@ -105,7 +106,7 @@ func (CodeBuddyCN) Resolve(ctx context.Context, cb oauth.Callbacks, temp map[str
 	if state == "" {
 		return nil, fmt.Errorf("codebuddy resolve: state missing")
 	}
-	u := codebuddyTokenURL + "?" + url.Values{"state": {state}}.Encode()
+	u := upstream.CNEndpoint(codebuddyTokenURL, "CODEBUDDY_TOKEN_URL") + "?" + url.Values{"state": {state}}.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
@@ -143,6 +144,8 @@ func (CodeBuddyCN) Resolve(ctx context.Context, cb oauth.Callbacks, temp map[str
 			RefreshToken string `json:"refreshToken"`
 			TokenType    string `json:"tokenType"`
 			ExpiresIn    int64  `json:"expiresIn"`
+			Domain       string `json:"domain"`
+			EnterpriseID string `json:"enterpriseId"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &data); err != nil {
@@ -154,7 +157,17 @@ func (CodeBuddyCN) Resolve(ctx context.Context, cb oauth.Callbacks, temp map[str
 		if expiresIn <= 0 {
 			expiresIn = 86400 // registry mapTokens 默认 1 天
 		}
-		return newTokenSet(data.Data.AccessToken, data.Data.RefreshToken, int(expiresIn), nil, nowFunc(cb)), nil
+		extra := map[string]string{"realm": "cn", "domain": "copilot.tencent.com"}
+		if data.Data.Domain != "" {
+			extra["domain"] = data.Data.Domain
+		}
+		if data.Data.EnterpriseID != "" {
+			extra["enterprise_id"] = data.Data.EnterpriseID
+		}
+		if uid := parseWorkbuddyJWTClaims(data.Data.AccessToken).UID; uid != "" {
+			extra["uid"] = uid
+		}
+		return newTokenSet(data.Data.AccessToken, data.Data.RefreshToken, int(expiresIn), extra, nowFunc(cb)), nil
 	}
 	if data.Code == 11217 {
 		return nil, &oauth.PendingError{Reason: "authorization_pending"}
@@ -168,7 +181,7 @@ func (CodeBuddyCN) Refresh(ctx context.Context, cb oauth.Callbacks, tok *oauth.T
 	if tok == nil || tok.RefreshToken == "" {
 		return nil, fmt.Errorf("codebuddy refresh: no refresh_token")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, codebuddyRefreshURL, strings.NewReader("{}"))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstream.CNEndpoint(codebuddyRefreshURL, "CODEBUDDY_REFRESH_URL"), strings.NewReader("{}"))
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +213,7 @@ func (CodeBuddyCN) Refresh(ctx context.Context, cb oauth.Callbacks, tok *oauth.T
 		} `json:"data"`
 	}
 	_ = json.Unmarshal(body, &data)
-	if data.Code != 0 || data.Data.AccessToken == "" {
+	if resp.StatusCode >= 400 || data.Code != 0 || data.Data.AccessToken == "" {
 		oauthErr := data.Msg
 		if oauthErr == "" {
 			oauthErr = fmt.Sprintf("code=%d", data.Code)

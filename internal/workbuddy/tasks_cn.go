@@ -419,11 +419,6 @@ func inNightWindow(now time.Time) bool {
 // 对齐 wb_accounts.py:1844-1851 is_enterprise()：登录数据里的 enterpriseId
 // （wb_accounts.py:493）或 accessToken 未校验 JWT 的 enterprise_id claim
 // （wb_accounts.py:1836-1842 jwt_enterprise_id）任一非空即为企业版。
-//
-// 我们只能覆盖 token claim 这一路：CN OAuth 登录（codebuddy.go Resolve）没有把
-// 登录响应的 data.enterpriseId 持久化进 TokenSet.Extra。
-// TODO(上游 A-企业版): 待 CN 登录响应 data.enterpriseId 落库到 TokenSet.Extra 后
-// 在此补上账号数据判定；当前缺失该数据，故仅按 token claim 做只读判定。
 func cnIsEnterprise(tok *oauth.TokenSet) bool {
 	if tok == nil {
 		return false

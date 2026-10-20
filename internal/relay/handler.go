@@ -536,6 +536,9 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 			if req.Stream && status >= http.StatusOK && status < http.StatusMultipleChoices {
 				return
 			}
+			if wbExtra != nil && stopWorkbuddyFailover(status, callErr) {
+				break
+			}
 			continue
 		}
 		if callErr == errClientGone {

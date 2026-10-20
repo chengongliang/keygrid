@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,45 +53,45 @@ func identMatrixCases() []identMatrixCase {
 	return []identMatrixCase{
 		{
 			name: "intl/desktop", realm: RealmIntl, product: "", domain: "www.workbuddy.ai",
-			ideName: "WorkBuddy", product2: "WorkBuddy", version: "5.5.2",
-			ua:        "WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2",
+			ideName: "WorkBuddy", product2: "WorkBuddy", version: "5.8.4",
+			ua:        "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0",
 			intentKey: "X-Agent-Purpose", intentValue: "conversation",
-			conversation: false,
+			conversation: true,
 		},
 		{
 			name: "cn/desktop", realm: RealmCN, product: DefaultProduct(), domain: "copilot.tencent.com",
 			ideName: "WorkBuddy", product2: "WorkBuddy", version: "5.5.6",
 			ua:        "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1",
 			intentKey: "X-Agent-Purpose", intentValue: "conversation",
-			conversation: false,
+			conversation: true,
 		},
 		{
 			name: "intl/vscode", realm: RealmIntl, product: "vscode", domain: "www.workbuddy.ai",
 			ideName: "VSCode", product2: "SaaS", version: "1.119.0",
-			ua:        "VSCode/1.119.0 WorkBuddy/4.9.29177644",
+			ua:        "VSCode/1.119.0 CodeBuddy/4.12.39997873",
 			intentKey: "X-Agent-Intent", intentValue: "craft",
-			extra:        map[string]string{"X-Env-ID": "production", "X-Product-Version": "4.9.29177644"},
+			extra:        map[string]string{"X-Env-ID": "production", "X-Product-Version": "4.12.39997873"},
 			conversation: true,
 		},
 		{
-			name: "cn/vscode", realm: RealmCN, product: "vscode", domain: "copilot.tencent.com",
+			name: "cn/vscode", realm: RealmCN, product: "vscode", domain: "www.workbuddy.cn",
 			ideName: "VSCode", product2: "SaaS", version: "1.119.0",
-			ua:        "VSCode/1.119.0 WorkBuddy/4.9.29177644",
+			ua:        "VSCode/1.119.0 CodeBuddy/4.12.39997873",
 			intentKey: "X-Agent-Intent", intentValue: "craft",
-			extra:        map[string]string{"X-Env-ID": "production", "X-Product-Version": "4.9.29177644"},
+			extra:        map[string]string{"X-Env-ID": "production", "X-Product-Version": "4.12.39997873"},
 			conversation: true,
 		},
 		{
 			name: "intl/cli", realm: RealmIntl, product: "cli", domain: "www.workbuddy.ai",
-			ideName: "CLI", product2: "SaaS", version: "2.117.2",
-			ua:        "CLI/2.117.2 CodeBuddy/2.117.2",
+			ideName: "CLI", product2: "SaaS", version: "2.168.2",
+			ua:        "CLI/2.168.2 CodeBuddy/2.168.2",
 			intentKey: "X-Agent-Intent", intentValue: "craft",
 			conversation: true,
 		},
 		{
 			name: "cn/cli", realm: RealmCN, product: "cli", domain: "copilot.tencent.com",
-			ideName: "CLI", product2: "SaaS", version: "2.117.2",
-			ua:        "CLI/2.117.2 CodeBuddy/2.117.2",
+			ideName: "CLI", product2: "SaaS", version: "2.168.2",
+			ua:        "CLI/2.168.2 CodeBuddy/2.168.2",
 			intentKey: "X-Agent-Intent", intentValue: "craft",
 			conversation: true,
 		},
@@ -137,11 +138,11 @@ func TestIdentHeadersMatrix(t *testing.T) {
 				}
 			}
 			// 非本档的 intent 头不应出现。
-			if tc.intentKey == "X-Agent-Intent" {
+			if tc.product == "vscode" {
 				if h.Get("X-Agent-Purpose") != "" {
 					t.Errorf("vscode/cli 不应设置 X-Agent-Purpose")
 				}
-			} else if h.Get("X-Agent-Intent") != "" {
+			} else if tc.intentKey == "X-Agent-Purpose" && h.Get("X-Agent-Intent") != "" {
 				t.Errorf("desktop 不应设置 X-Agent-Intent")
 			}
 			// Authorization 永不设置。
@@ -195,7 +196,7 @@ func TestIdentFingerprint(t *testing.T) {
 }
 
 func TestIdentConversationHeaders(t *testing.T) {
-	for _, product := range []string{"vscode", "cli"} {
+	for _, product := range []string{"workbuddy", "vscode", "cli"} {
 		t.Run(product, func(t *testing.T) {
 			h, err := Headers(identProvider(RealmIntl), identToken("uid-conv"), HeaderOpt{
 				Product: product, Now: identFixedNow,
@@ -205,11 +206,11 @@ func TestIdentConversationHeaders(t *testing.T) {
 			}
 			keys := []string{
 				"X-Conversation-ID", "X-Conversation-Request-ID",
-				"X-Conversation-Message-ID", "X-Request-ID",
+				"X-Conversation-Message-ID",
 			}
 			seen := map[string]string{}
 			for _, k := range keys {
-				v := h.Get(k)
+				v := strings.ReplaceAll(h.Get(k), "-", "")
 				if !identHex32.MatchString(v) {
 					t.Errorf("头 %s = %q, 期望 32 位小写 hex", k, v)
 					continue
@@ -218,6 +219,13 @@ func TestIdentConversationHeaders(t *testing.T) {
 					t.Errorf("头 %s 与 %s 生成了相同的 id: %q", k, prev, v)
 				}
 				seen[v] = k
+			}
+			if product == "vscode" {
+				if h.Get("X-Request-ID") != h.Get("X-Conversation-Request-ID") || h.Get("X-Root-Request-ID") != "" {
+					t.Fatal("VSCode 请求 id 关系错误")
+				}
+			} else if h.Get("X-Request-ID") != h.Get("X-Conversation-Message-ID") || h.Get("X-Root-Request-ID") != h.Get("X-Conversation-Request-ID") {
+				t.Fatal("桌面端/CLI 请求 id 关系错误")
 			}
 		})
 	}
@@ -235,7 +243,7 @@ func TestIdentConversationIDProvided(t *testing.T) {
 	}
 }
 
-func TestIdentDesktopNoConversation(t *testing.T) {
+func TestIdentDesktopConversation(t *testing.T) {
 	h, err := Headers(identProvider(RealmIntl), identToken("uid-desk"), HeaderOpt{Now: identFixedNow})
 	if err != nil {
 		t.Fatalf("Headers 错误: %v", err)
@@ -243,8 +251,51 @@ func TestIdentDesktopNoConversation(t *testing.T) {
 	if !identHex32.MatchString(h.Get("X-Request-ID")) {
 		t.Errorf("desktop 应有 32 位 hex 的 X-Request-ID, 实得 %q", h.Get("X-Request-ID"))
 	}
-	if h.Get("X-Conversation-ID") != "" {
-		t.Errorf("desktop 不应有 X-Conversation-ID, 实得 %q", h.Get("X-Conversation-ID"))
+	if len(h.Get("X-Conversation-ID")) != 36 {
+		t.Errorf("desktop 应有 UUID 会话 id, 实得 %q", h.Get("X-Conversation-ID"))
+	}
+}
+
+func TestIdentConversationIDsAreUniqueAcrossRequests(t *testing.T) {
+	seen := map[string]bool{}
+	for range 100 {
+		headers, err := Headers(identProvider(RealmIntl), identToken("same-user"), HeaderOpt{Now: identFixedNow})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{"X-Conversation-ID", "X-Conversation-Request-ID", "X-Conversation-Message-ID"} {
+			identifier := strings.ReplaceAll(headers.Get(key), "-", "")
+			if seen[identifier] {
+				t.Fatal("同一时刻不同请求生成了重复 id")
+			}
+			if len(identifier) != 32 || identifier[12] != '7' || !strings.ContainsRune("89ab", rune(identifier[16])) {
+				t.Fatalf("不是 UUIDv7: %q", identifier)
+			}
+			seen[identifier] = true
+		}
+	}
+}
+
+func TestIdentAccountDomainAndCLIPrivacy(t *testing.T) {
+	t.Setenv("WB_CN_CHAT_UPSTREAM", "https://www.workbuddy.cn")
+	token := identToken("uid-cn")
+	token.Extra["domain"] = "copilot.tencent.com"
+	for _, enterprise := range []string{"", "enterprise-test"} {
+		token.Extra["enterprise_id"] = enterprise
+		headers, err := Headers(identProvider(RealmCN), token, HeaderOpt{Product: ProductCLI})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if headers.Get("X-Domain") != "copilot.tencent.com" {
+			t.Fatal("账号 domain 不应跟随连接域名改变")
+		}
+		wantPrivate := "false"
+		if enterprise != "" {
+			wantPrivate = "true"
+		}
+		if headers.Get("X-Private-Data") != wantPrivate || headers.Get("X-Agent-Runtime") != "other" || headers.Get("X-Agent-Type") != "main" {
+			t.Fatalf("CLI 账号身分错误: %v", headers)
+		}
 	}
 }
 
@@ -265,8 +316,8 @@ func TestIdentUnknownProductFallsBackToDesktop(t *testing.T) {
 			t.Errorf("未知 product 的 %s = %q, 期望回落到桌面档 %q", k, fallback.Get(k), desktop.Get(k))
 		}
 	}
-	if fallback.Get("X-Conversation-ID") != "" {
-		t.Errorf("未知 product 回落桌面档不应带会话头")
+	if len(fallback.Get("X-Conversation-ID")) != 36 {
+		t.Errorf("未知 product 回落桌面档应带 UUID 会话头")
 	}
 }
 

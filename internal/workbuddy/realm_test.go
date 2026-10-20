@@ -109,6 +109,35 @@ func TestEndpointRejectsForeignProvider(t *testing.T) {
 	}
 }
 
+func TestCNUpstreamOverride(t *testing.T) {
+	t.Setenv("WB_CN_CHAT_UPSTREAM", "https://www.workbuddy.cn/")
+	for _, base := range []string{"", cnChatBase, cnChatBase + "/v2", cnChatBase + ChatPath} {
+		provider := &model.Provider{OAuthProvider: ProviderCN, BaseURL: base}
+		for path, endpoint := range map[string]func(*model.Provider) (string, error){
+			ChatPath: Endpoint, NarrowModelsPath: ModelsEndpoint, RemoteConfigPath: RemoteConfigEndpoint,
+		} {
+			got, err := endpoint(provider)
+			if err != nil || got != "https://www.workbuddy.cn"+path {
+				t.Fatalf("base=%q path=%q: got %q, err=%v", base, path, got, err)
+			}
+		}
+	}
+	custom := &model.Provider{OAuthProvider: ProviderCN, BaseURL: "https://custom.example/v2"}
+	if got, err := Endpoint(custom); err != nil || got != "https://custom.example"+ChatPath {
+		t.Fatalf("不应覆盖渠道自填地址: %q, %v", got, err)
+	}
+	intl := &model.Provider{OAuthProvider: ProviderIntl}
+	if got, err := Endpoint(intl); err != nil || got != intlChatBase+ChatPath {
+		t.Fatalf("不应影响国际版: %q, %v", got, err)
+	}
+	if got := cnTaskBaseURL(RealmCN); got != "https://www.workbuddy.cn" {
+		t.Fatalf("成长任务未跟随改址: %q", got)
+	}
+	if got := BillingBase(RealmCN); got != cnBillingBase {
+		t.Fatalf("计费域不应跟随改址: %q", got)
+	}
+}
+
 func TestAuxiliaryEndpoints(t *testing.T) {
 	if got := CreditsEndpoint(RealmCN); got != "https://www.codebuddy.cn/v2/billing/meter/get-user-resource" {
 		t.Fatalf("CreditsEndpoint(cn) = %q", got)

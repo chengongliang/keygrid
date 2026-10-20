@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/chengongliang/keygrid/internal/oauth"
+	"github.com/chengongliang/keygrid/internal/workbuddy/upstream"
 )
 
 // workbuddy.go WorkBuddy 国际版（intl）浏览器 OAuth 轮询流，协议与 codebuddy-cn 一致，
@@ -31,9 +32,9 @@ var (
 	workbuddyRefreshURL = envOr("WORKBUDDY_REFRESH_URL", "https://www.workbuddy.ai/v2/plugin/auth/token/refresh")
 	workbuddyAccountURL = envOr("WORKBUDDY_ACCOUNT_URL", "https://www.workbuddy.ai/v2/plugin/login/account")
 	// workbuddyUA chat 面 UA（relay 侧使用，wb_accounts.py REALM_CONFIGS.intl.chat_ua）
-	workbuddyUA = "WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2"
+	workbuddyUA = upstream.DesktopUAIntl
 	// workbuddyAuthUA 授权/计费面 UA（本文件所有请求用它，对应 billing_ua）
-	workbuddyAuthUA = "WorkBuddy/5.5.2"
+	workbuddyAuthUA = "WorkBuddy/" + upstream.DesktopVersionIntl
 	workbuddyDomain = "www.workbuddy.ai"
 )
 
@@ -43,7 +44,7 @@ var (
 //	Content-Type: application/json
 //	Accept: application/json, text/plain, */*
 //	X-Requested-With: XMLHttpRequest
-//	User-Agent: WorkBuddy/5.5.2        ← 计费/插件面 UA，**不是** chat 面的 CLI UA
+//	User-Agent: WorkBuddy/5.8.4        ← 计费/插件面 UA，**不是** chat 面的 CLI UA
 //	Origin/Referer: https://www.workbuddy.ai/
 //
 // 注意这组头里没有 X-Domain / X-Ide-*：那些是 chat 面（relay 侧 workbuddy.Headers）
@@ -236,7 +237,7 @@ func (WorkBuddyIntl) Refresh(ctx context.Context, cb oauth.Callbacks, tok *oauth
 		} `json:"data"`
 	}
 	_ = json.Unmarshal(body, &data)
-	if data.Code != 0 || data.Data.AccessToken == "" {
+	if resp.StatusCode >= 400 || data.Code != 0 || data.Data.AccessToken == "" {
 		oauthErr := data.Msg
 		if oauthErr == "" {
 			oauthErr = fmt.Sprintf("code=%d", data.Code)

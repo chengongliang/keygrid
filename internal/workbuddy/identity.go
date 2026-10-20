@@ -14,16 +14,17 @@ package workbuddy
 
 import (
 	"crypto/md5"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/chengongliang/keygrid/internal/model"
 	"github.com/chengongliang/keygrid/internal/oauth"
+	"github.com/chengongliang/keygrid/internal/workbuddy/upstream"
 )
 
 // 产品档位常量。出站身分三选一，未知值回落到 workbuddy（桌面端）。
@@ -53,7 +54,7 @@ type HeaderOpt struct {
 	Product string
 	// Fingerprint 是否附带设备指纹头（X-Machine-ID / X-Session-ID），默认 false。
 	Fingerprint bool
-	// ConversationID VSC/CLI 档的会话 id；空则由本函数生成。
+	// ConversationID 会话 id；空则由本函数生成。
 	ConversationID string
 	// Now 注入当前时间（测试用）；nil 用 time.Now。
 	Now func() time.Time
@@ -74,6 +75,12 @@ func Headers(p *model.Provider, tok *oauth.TokenSet, opt HeaderOpt) (http.Header
 
 	product := identProduct(opt.Product)
 	domain := identDomain(realm)
+	if realm == RealmCN && product == productVSCode {
+		domain = "www.workbuddy.cn"
+	}
+	if tok != nil && strings.TrimSpace(tok.Extra["domain"]) != "" {
+		domain = strings.TrimSpace(tok.Extra["domain"])
+	}
 	uid := UIDFrom(tok)
 
 	h := make(http.Header)
@@ -96,7 +103,7 @@ func Headers(p *model.Provider, tok *oauth.TokenSet, opt HeaderOpt) (http.Header
 	if now == nil {
 		now = time.Now
 	}
-	gen := &identGen{now: now, uid: uid}
+	gen := &identGen{now: now}
 
 	switch product {
 	case productVSCode:
@@ -106,30 +113,50 @@ func Headers(p *model.Provider, tok *oauth.TokenSet, opt HeaderOpt) (http.Header
 		h.Set("X-Agent-Intent", "craft")
 		// vscode 专属：环境标识与产品版本。
 		h.Set("X-Env-ID", "production")
-		h.Set("X-Product-Version", "4.9.29177644")
+		h.Set("X-Product-Version", upstream.VSCodeProductVersion)
+		h.Set("X-Agent-Type", "main")
+		if realm == RealmIntl {
+			h.Set("X-Private-Data", "true")
+		}
 	case productCLI:
 		h.Set("X-IDE-Name", "CLI")
 		h.Set("X-IDE-Type", "CLI")
 		h.Set("X-Product", "SaaS")
 		h.Set("X-Agent-Intent", "craft")
+		h.Set("X-Agent-Purpose", "conversation")
+		h.Set("X-Agent-Type", "main")
+		h.Set("X-Agent-Runtime", "other")
+		privateData := "false"
+		if cnIsEnterprise(tok) {
+			privateData = "true"
+		}
+		h.Set("X-Private-Data", privateData)
 	default: // productDesktop
 		h.Set("X-IDE-Name", "WorkBuddy")
 		h.Set("X-IDE-Type", "WorkBuddy")
 		h.Set("X-Product", "WorkBuddy")
 		h.Set("X-Agent-Purpose", "conversation")
+		h.Set("X-Agent-Type", "main")
+		h.Set("X-Agent-Runtime", "other")
 	}
 
-	// 会话相关头：VSC/CLI 档额外带四个（会话 id + 请求/消息 id）；桌面端只有 X-Request-ID。
-	if product == productVSCode || product == productCLI {
-		convID := strings.TrimSpace(opt.ConversationID)
-		if convID == "" {
-			convID = gen.next()
+	convID := strings.TrimSpace(opt.ConversationID)
+	if convID == "" {
+		convID = gen.next()
+		if product != productVSCode {
+			convID = convID[:8] + "-" + convID[8:12] + "-" + convID[12:16] + "-" + convID[16:20] + "-" + convID[20:]
 		}
-		h.Set("X-Conversation-ID", convID)
-		h.Set("X-Conversation-Request-ID", gen.next())
-		h.Set("X-Conversation-Message-ID", gen.next())
 	}
-	h.Set("X-Request-ID", gen.next())
+	h.Set("X-Conversation-ID", convID)
+	requestID, messageID := gen.next(), gen.next()
+	h.Set("X-Conversation-Request-ID", requestID)
+	h.Set("X-Conversation-Message-ID", messageID)
+	if product == productVSCode {
+		h.Set("X-Request-ID", requestID)
+	} else {
+		h.Set("X-Root-Request-ID", requestID)
+		h.Set("X-Request-ID", messageID)
+	}
 
 	// 设备指纹头：Python 源从真实设备指纹推导；我们只有 uid，改用稳定但合成的
 	// 派生值，因此默认关闭（opt.Fingerprint=false），需要时由调用方显式打开。
@@ -177,14 +204,14 @@ func identDomain(realm Realm) string {
 func identVersion(realm Realm, product string) string {
 	switch product {
 	case productVSCode:
-		return "1.119.0"
+		return upstream.VSCodeVersion
 	case productCLI:
-		return "2.117.2"
-	default: // desktop：国内 5.5.6 / 国际 5.5.2
+		return upstream.CLIVersion
+	default:
 		if realm == RealmCN {
-			return "5.5.6"
+			return upstream.DesktopVersionCN
 		}
-		return "5.5.2"
+		return upstream.DesktopVersionIntl
 	}
 }
 
@@ -192,32 +219,33 @@ func identVersion(realm Realm, product string) string {
 func uaFor(realm Realm, product string) string {
 	switch product {
 	case productVSCode:
-		return "VSCode/1.119.0 WorkBuddy/4.9.29177644"
+		return upstream.VSCodeUA
 	case productCLI:
-		return "CLI/2.117.2 CodeBuddy/2.117.2"
+		return upstream.CLIUA
 	default: // desktop
 		if realm == RealmCN {
-			return "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1"
+			return upstream.DesktopUACN
 		}
-		return "WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2"
+		return upstream.DesktopUAIntl
 	}
 }
 
-// identGen 生成 32 位小写 hex 的请求/会话 id。
-//
-// 用注入的 Now + 自增序号 + uid 做 md5，保证同一次调用内每个 id 互不相同，
-// 且不依赖 time.Now 的真实取值（测试可注入固定时间，仍只校验形状/唯一性）。
+// identGen 生成带随机位的 UUIDv7，请求 id 使用无连字符的 32 位 hex。
 type identGen struct {
 	now func() time.Time
-	uid string
-	seq int
 }
 
-// next 返回下一个 32 位小写 hex id。序号自增确保唯一性。
 func (g *identGen) next() string {
-	g.seq++
-	raw := fmt.Sprintf("keygrid:workbuddy:req:%s:%d:%d", g.uid, g.seq, g.now().UnixNano())
-	return identFingerprint("", raw)
+	var identifier [16]byte
+	_, _ = rand.Read(identifier[:])
+	millis := uint64(g.now().UnixMilli())
+	for index := 5; index >= 0; index-- {
+		identifier[index] = byte(millis)
+		millis >>= 8
+	}
+	identifier[6] = identifier[6]&0x0f | 0x70
+	identifier[8] = identifier[8]&0x3f | 0x80
+	return hex.EncodeToString(identifier[:])
 }
 
 // identFingerprint 对 prefix+payload 取 md5 的 32 位小写 hex。
