@@ -47,7 +47,7 @@ func TestUpstreamCallWorkbuddyForcedStreamCollapse(t *testing.T) {
 	h := &Handler{HTTPClient: srv.Client()}
 	rec := httptest.NewRecorder()
 	status, usage, err := h.upstreamCall(context.Background(), srv.Client(), srv.URL, "tok-1",
-		[]byte(`{"model":"m","stream":false}`), false, protoOpenAI, rec, "WorkBuddy/from-ua", extra, true)
+		[]byte(`{"model":"m","stream":false}`), false, protoOpenAI, rec, "WorkBuddy/from-ua", extra, true, nil)
 	if err != nil {
 		t.Fatalf("upstreamCall error = %v", err)
 	}
@@ -114,7 +114,7 @@ func TestUpstreamCallWorkbuddyStreamPassthrough(t *testing.T) {
 	h := &Handler{HTTPClient: srv.Client()}
 	rec := httptest.NewRecorder()
 	status, _, err := h.upstreamCall(context.Background(), srv.Client(), srv.URL, "tok", nil,
-		true, protoOpenAI, rec, "", nil, true)
+		true, protoOpenAI, rec, "", nil, true, nil)
 	if err != nil {
 		t.Fatalf("upstreamCall error = %v", err)
 	}
@@ -140,7 +140,7 @@ func TestUpstreamCallNonWorkbuddyUnaffected(t *testing.T) {
 	h := &Handler{HTTPClient: srv.Client()}
 	rec := httptest.NewRecorder()
 	status, usage, err := h.upstreamCall(context.Background(), srv.Client(), srv.URL, "tok", nil,
-		false, protoOpenAI, rec, "", nil, false)
+		false, protoOpenAI, rec, "", nil, false, nil)
 	if err != nil || status != http.StatusOK {
 		t.Fatalf("upstreamCall status=%d err=%v", status, err)
 	}

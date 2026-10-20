@@ -655,6 +655,8 @@ func (h *Handler) upstreamCallAnthropic(
 	if clientStream {
 		req.Header.Set("Accept", "text/event-stream")
 	}
+	// 渠道级附加头（providers.upstream_headers）最后落地：用户显式配置优先。
+	ApplyUpstreamHeaders(req.Header, p)
 
 	upResp, err := client.Do(req)
 	if err != nil {

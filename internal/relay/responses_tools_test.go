@@ -152,7 +152,7 @@ func TestResponsesFileToolsRoundTrip(t *testing.T) {
 				defer server.Close()
 				recorder := httptest.NewRecorder()
 				h := &Handler{}
-				status, _, err := h.upstreamCall(context.Background(), server.Client(), server.URL, "test", pivot, stream, protoResponses, bridgeResponsesTools(recorder, raw), "", nil, false)
+				status, _, err := h.upstreamCall(context.Background(), server.Client(), server.URL, "test", pivot, stream, protoResponses, bridgeResponsesTools(recorder, raw), "", nil, false, nil)
 				if err != nil || status != 200 {
 					t.Fatalf("upstream: %d %v", status, err)
 				}

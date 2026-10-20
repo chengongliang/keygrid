@@ -183,6 +183,9 @@ func probeUpstream(ctx context.Context, client *http.Client, p *model.Provider, 
 			req.Header.Set("chatgpt-account-id", accountID)
 		}
 	}
+	// 渠道级附加头：与转发主路径同源，避免「测连失败但实际转发正常」的误报
+	// （上游抬高客户端版本后，测连会先撞上版本校验）。
+	relay.ApplyUpstreamHeaders(req.Header, p)
 
 	start := time.Now()
 	respUp, err := client.Do(req)

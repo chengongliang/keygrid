@@ -18,7 +18,7 @@ const (
 	xaiTokenAuthHeader     = "X-XAI-Token-Auth"
 	xaiTokenAuthValue      = "xai-grok-cli"
 	xaiClientVersionHeader = "x-grok-client-version"
-	xaiClientVersion       = "0.2.120"
+	xaiClientVersion       = "1.0.62"
 	xaiClientIDHeader      = "x-grok-client-identifier"
 	xaiClientIDValue       = "grok-shell"
 	xaiAuthResponseHeader  = "x-authenticateresponse"
@@ -172,6 +172,7 @@ func explicitResponsesSession(r *http.Request, body []byte) string {
 
 // upstreamCallXAI 执行 xAI Responses 调用。Responses SSE 的聚合与三入口桥接
 // 与 Codex 共用，差异仅在请求头和 xAI endpoint。
+// p 非空时落地渠道级附加头（providers.upstream_headers）。
 func (h *Handler) upstreamCallXAI(
 	ctx context.Context,
 	client *http.Client,
@@ -182,6 +183,7 @@ func (h *Handler) upstreamCallXAI(
 	entry string,
 	w http.ResponseWriter,
 	ua string,
+	p *model.Provider,
 ) (int, UsageRecord, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, strings.NewReader(string(body)))
 	if err != nil {
@@ -194,6 +196,15 @@ func (h *Handler) upstreamCallXAI(
 	}
 	if ua != "" {
 		req.Header.Set("User-Agent", ua)
+	}
+	ApplyUpstreamHeaders(req.Header, p)
+	// 官方 endpoint 上两个指纹头必须同版本：渠道只改 x-grok-client-version 时
+	// UA 版本跟着走，避免「UA 说旧版、版本头说新版」被上游判成伪造客户端。
+	// ua_mode 显式配置（ua 非空）时以渠道 UA 为准，不做联动。
+	if ua == "" && isXAIChatProxyEndpoint(target) {
+		if v := strings.TrimSpace(req.Header.Get(xaiClientVersionHeader)); v != "" && v != xaiClientVersion {
+			req.Header.Set("User-Agent", "xai-grok-workspace/"+v)
+		}
 	}
 
 	upResp, err := client.Do(req)

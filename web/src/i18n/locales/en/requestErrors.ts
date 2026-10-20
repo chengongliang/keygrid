@@ -23,4 +23,5 @@ export default {
   kindUpstream5xx: 'Upstream 5xx',
   kindTransport: 'Network / connect',
   kindStreamAborted: 'Stream aborted',
+  kindClientOutdated: 'Client version outdated',
 }

@@ -85,7 +85,7 @@ func TestApplyWorkbuddyScrubReachesUpstream(t *testing.T) {
 			// 把 handler 产出的 body 真正发往假上游，断言上游收到什么。
 			rec := httptest.NewRecorder()
 			status, _, err := h.upstreamCall(context.Background(), srv.Client(), srv.URL, "tok",
-				got, false, protoOpenAI, rec, "", nil, false)
+				got, false, protoOpenAI, rec, "", nil, false, nil)
 			if err != nil || status != http.StatusOK {
 				t.Fatalf("upstreamCall status=%d err=%v", status, err)
 			}

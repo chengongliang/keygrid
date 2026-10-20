@@ -1119,6 +1119,8 @@ func (h *Handler) upstreamCallCodex(
 	if ua != "" {
 		req.Header.Set("User-Agent", ua)
 	}
+	// 渠道级附加头（providers.upstream_headers）最后落地：用户显式配置优先。
+	ApplyUpstreamHeaders(req.Header, provider)
 
 	upResp, err := client.Do(req)
 	if err != nil {

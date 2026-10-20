@@ -27,12 +27,13 @@ type WizardState = {
   breaker_check: boolean // 是否参与熔断检测（默认关：单渠道不稳定时熔断等于整段不可用）
   ua_mode: string // 上游 UA 策略：'' 默认透传客户端 / custom / forward
   user_agent: string // ua_mode=custom 时的 UA 值
+  upstream_headers_text: string // 上游附加请求头（每行 Name: Value）
 }
 
 const emptyWizard: WizardState = {
   step: 1, kind: 'api_key', presetKey: '', name: '', nameTouched: false, protocol: 'openai', base_url: '',
   oauth_provider: 'kimi', api_key: '', model_map_text: '', priority: 0, use_proxy: false, breaker_check: false,
-  ua_mode: '', user_agent: '',
+  ua_mode: '', user_agent: '', upstream_headers_text: '',
 }
 
 // 编辑表单：字段与新增向导保持一致（渠道类型 / OAuth provider 定型后不可改，仅展示）。
@@ -54,6 +55,7 @@ type EditForm = {
   breaker_check: boolean
   ua_mode: string
   user_agent: string
+  upstream_headers_text: string
 }
 
 const toEditForm = (p: Provider): EditForm => ({
@@ -74,6 +76,7 @@ const toEditForm = (p: Provider): EditForm => ({
   breaker_check: p.breaker_check ?? false,
   ua_mode: p.ua_mode ?? '',
   user_agent: p.user_agent ?? '',
+  upstream_headers_text: serializeHeadersText(p.upstream_headers),
 })
 
 const presetLabel = (p: ProviderPreset) =>
@@ -97,6 +100,28 @@ const parseModelMap = (text: string): Record<string, string> | null => {
 // 序列化 model_map：空对象 → ''（不提交空串 JSON）
 const serializeMap = (m: Record<string, string>): string =>
   Object.keys(m).length ? JSON.stringify(m, null, 0) : ''
+
+// 上游附加请求头文本 ⇄ 对象：每行「Name: Value」。
+// 解析失败（缺少冒号 / 头名含空白）返回 null，由调用方提示修正；后端仍会做
+// 完整校验（非法头名、黑名单、CR/LF、长度），这里只做前端可读性检查。
+const parseHeadersText = (text: string): Record<string, string> | null => {
+  const out: Record<string, string> = {}
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    if (!line) continue
+    const i = line.indexOf(':')
+    if (i <= 0) return null
+    const name = line.slice(0, i).trim()
+    const value = line.slice(i + 1).trim()
+    if (!name || /\s/.test(name)) return null
+    out[name] = value
+  }
+  return out
+}
+
+// 对象 → 文本（无条目 → ''，不落空串噪声）
+const serializeHeadersText = (m?: Record<string, string>): string =>
+  m && Object.keys(m).length ? Object.entries(m).map(([k, v]) => `${k}: ${v}`).join('\n') : ''
 
 // 勾选/取消勾选一个模型名（保留已有映射值）
 const toggleKey = (cur: Record<string, string>, k: string): Record<string, string> => {
@@ -429,6 +454,11 @@ export default function Providers() {
       setErr(t('providers.errModelMapJson'))
       return
     }
+    const upstream_headers = parseHeadersText(wiz.upstream_headers_text)
+    if (upstream_headers === null) {
+      setErr(t('providers.errUpstreamHeaders'))
+      return
+    }
     const body: Record<string, unknown> = {
       name: wiz.name, kind: wiz.kind, protocol: wiz.protocol,
       model_map, priority: wiz.priority,
@@ -436,6 +466,7 @@ export default function Providers() {
       breaker_check: wiz.breaker_check,
       ua_mode: wiz.ua_mode,
       user_agent: wiz.ua_mode === 'custom' ? wiz.user_agent : '',
+      upstream_headers,
     }
     if (wiz.kind === 'api_key') {
       body.base_url = wiz.base_url
@@ -462,6 +493,11 @@ export default function Providers() {
       setErr(t('providers.errModelMapJson'))
       return
     }
+    const upstream_headers = parseHeadersText(editForm.upstream_headers_text)
+    if (upstream_headers === null) {
+      setErr(t('providers.errUpstreamHeaders'))
+      return
+    }
     const body: Record<string, unknown> = {
       name: editForm.name, protocol: editForm.protocol,
       priority: editForm.priority, enabled: editForm.enabled,
@@ -469,6 +505,8 @@ export default function Providers() {
       breaker_check: editForm.breaker_check,
       ua_mode: editForm.ua_mode,
       user_agent: editForm.ua_mode === 'custom' ? editForm.user_agent : '',
+      // 始终提交（空对象 = 清空），保证删掉的附加头真正生效
+      upstream_headers,
       // 始终提交（空对象 = 清空全部模型映射），保证取消勾选能真正生效
       model_map,
       // 计费名映射（P1.5）：空对象 = 清空；后端校验映射目标必须在价格表内
@@ -972,6 +1010,17 @@ export default function Providers() {
                 </div>
                 <p className="mt-1 text-xs text-muted">{t('providers.uaHint')}</p>
               </div>
+              <div>
+                <label className="label">{t('providers.upstreamHeadersLabel')}</label>
+                <textarea
+                  className="input font-mono text-xs"
+                  rows={3}
+                  value={wiz.upstream_headers_text}
+                  onChange={(e) => setWiz({ ...wiz, upstream_headers_text: e.target.value })}
+                  placeholder={t('providers.upstreamHeadersPlaceholder')}
+                />
+                <p className="mt-1 text-xs text-muted">{t('providers.upstreamHeadersHint')}</p>
+              </div>
               {wiz.kind === 'api_key' && (
                 <div>
                   <label className="label">{t('providers.wizard.apiKeyLabel')}</label>
@@ -1380,6 +1429,17 @@ export default function Providers() {
                 )}
               </div>
               <p className="mt-1 text-xs text-muted">{t('providers.uaHint')}</p>
+            </div>
+            <div>
+              <label className="label">{t('providers.upstreamHeadersLabel')}</label>
+              <textarea
+                className="input font-mono text-xs"
+                rows={3}
+                value={editForm.upstream_headers_text}
+                onChange={(e) => setEditForm({ ...editForm, upstream_headers_text: e.target.value })}
+                placeholder={t('providers.upstreamHeadersPlaceholder')}
+              />
+              <p className="mt-1 text-xs text-muted">{t('providers.upstreamHeadersHint')}</p>
             </div>
             <ModelPicker
               canFetch

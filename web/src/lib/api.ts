@@ -60,6 +60,8 @@ export interface Provider {
   ua_mode?: string
   /** ua_mode=custom 时的 UA 值 */
   user_agent?: string
+  /** 渠道级上游附加请求头（覆盖同名头；敏感头由后端黑名单拒绝） */
+  upstream_headers?: Record<string, string>
   /** 授权标记：api_key 恒 true；oauth = 已完成授权（有 active 凭据）。未授权渠道显示"待授权"。 */
   authorized?: boolean
   created_at: string
@@ -342,7 +344,8 @@ export interface RequestErrorRow {
   api_key_name: string
   model: string
   /** 失败分类：no_channel / circuit_open / credential / transform / proxy /
-   *  upstream_4xx / upstream_429 / upstream_5xx / transport / stream_aborted */
+   *  upstream_4xx / upstream_429 / upstream_5xx / transport / stream_aborted /
+   *  client_outdated（上游要求更新客户端版本） */
   kind: string
   status_code: number
   /** 上游错误摘要（已截断；不含 prompt 与响应正文） */

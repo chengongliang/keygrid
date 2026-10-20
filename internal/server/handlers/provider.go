@@ -51,6 +51,9 @@ type createProviderReq struct {
 	UAMode *string `json:"ua_mode"`
 	// UserAgent UAMode=custom 时的值
 	UserAgent *string `json:"user_agent"`
+	// UpstreamHeaders 渠道级上游附加请求头：转发时覆盖同名头，用于跟进上游
+	// 强校验的客户端指纹头（如 x-grok-client-version）。敏感头由 relay 黑名单拒绝。
+	UpstreamHeaders map[string]string `json:"upstream_headers"`
 }
 
 // oauthDefaultBaseURL 各 oauth provider 的默认上游（oauth/presets.go ProviderPresets 单一事实来源）。
@@ -236,6 +239,12 @@ func (h *ProviderHandler) Create(w http.ResponseWriter, r *http.Request) {
 		resp.BadRequest(w, "invalid user_agent: 自定义 UA 不能为空、不能含换行，且不超过 256 字符")
 		return
 	}
+	// 附加请求头校验：头名/长度/CR-LF + 敏感头黑名单（鉴权/报文形状头不可覆盖）
+	upstreamHeaders := relay.NormalizeUpstreamHeaders(req.UpstreamHeaders)
+	if err := relay.ValidUpstreamHeaders(upstreamHeaders); err != nil {
+		resp.BadRequest(w, err.Error())
+		return
+	}
 
 	// 计费名映射校验：目标必须在价格表内（映射只做名称归一化，改不了价格）
 	if err := h.validateBillingMap(req.BillingMap); err != nil {
@@ -243,19 +252,20 @@ func (h *ProviderHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := &model.Provider{
-		UserID:        userID,
-		Name:          req.Name,
-		Kind:          req.Kind,
-		Protocol:      req.Protocol,
-		BaseURL:       req.BaseURL,
-		OAuthProvider: req.OAuthProvider,
-		ModelMap:      req.ModelMap,
-		BillingMap:    req.BillingMap,
-		Priority:      req.Priority,
-		UseProxy:      useProxy,
-		BreakerCheck:  req.BreakerCheck != nil && *req.BreakerCheck,
-		UAMode:        uaMode,
-		UserAgent:     uaValue,
+		UserID:          userID,
+		Name:            req.Name,
+		Kind:            req.Kind,
+		Protocol:        req.Protocol,
+		BaseURL:         req.BaseURL,
+		OAuthProvider:   req.OAuthProvider,
+		ModelMap:        req.ModelMap,
+		BillingMap:      req.BillingMap,
+		Priority:        req.Priority,
+		UseProxy:        useProxy,
+		BreakerCheck:    req.BreakerCheck != nil && *req.BreakerCheck,
+		UAMode:          uaMode,
+		UserAgent:       uaValue,
+		UpstreamHeaders: upstreamHeaders,
 		// oauth 渠道授权完成前不参与转发：创建时禁用，saveTokenSet 首次授权成功后自动启用
 		Enabled: req.Kind == "api_key",
 	}
@@ -363,7 +373,9 @@ type updateProviderReq struct {
 	BreakerCheck *bool   `json:"breaker_check"`
 	UAMode       *string `json:"ua_mode"`
 	UserAgent    *string `json:"user_agent"`
-	APIKey       *string `json:"api_key"` // 传入则轮换凭据
+	// UpstreamHeaders 渠道级上游附加请求头；非 nil 即整体替换（空对象 = 清空）
+	UpstreamHeaders map[string]string `json:"upstream_headers"`
+	APIKey          *string           `json:"api_key"` // 传入则轮换凭据
 }
 
 // proxyAvailable 平台是否已配置出口代理（TTL 缓存内的新配置也一致）。
@@ -479,6 +491,15 @@ func (h *ProviderHandler) Update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// 附加请求头校验：必须在写库前完成（与 UA 同理，闭包里的 return 拦不住已写字段）
+	var upstreamHeaders map[string]string
+	if req.UpstreamHeaders != nil {
+		upstreamHeaders = relay.NormalizeUpstreamHeaders(req.UpstreamHeaders)
+		if err := relay.ValidUpstreamHeaders(upstreamHeaders); err != nil {
+			resp.BadRequest(w, err.Error())
+			return
+		}
+	}
 	p, err := h.Op.UpdateProvider(userID, id, func(p *model.Provider) {
 		if req.Name != nil {
 			p.Name = *req.Name
@@ -518,6 +539,9 @@ func (h *ProviderHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.UserAgent != nil {
 			p.UserAgent = strings.TrimSpace(*req.UserAgent)
+		}
+		if req.UpstreamHeaders != nil {
+			p.UpstreamHeaders = upstreamHeaders
 		}
 	})
 	if err != nil {
@@ -560,6 +584,10 @@ func (h *ProviderHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.UAMode != nil || req.UserAgent != nil {
 		changes = append(changes, "user_agent")
+	}
+	if req.UpstreamHeaders != nil {
+		// 只记条数，不落头值（可能含上游下发的一次性标识）
+		changes = append(changes, fmt.Sprintf("upstream_headers(count=%d)", len(upstreamHeaders)))
 	}
 	if req.APIKey != nil {
 		changes = append(changes, "credential(rotated)")

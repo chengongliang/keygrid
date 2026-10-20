@@ -2,6 +2,7 @@ package relay
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -36,6 +37,11 @@ const (
 	errKindUpstream5xx   = "upstream_5xx"   // 上游服务端错误
 	errKindTransport     = "transport"      // 连接 / DNS / TLS / 超时等传输层错误
 	errKindStreamAborted = "stream_aborted" // 流式响应已开始后上游中断（客户端看到截断）
+	// errKindClientOutdated 上游要求更新客户端版本（如 Grok Build 抬高最低
+	// x-grok-client-version、Codex CLI 版本封禁）。单独分类的意义：既不是参数/
+	// 凭据问题（不该改模型映射），也不是渠道故障（不该熔断）；正确处置是在渠道上
+	// 改附加请求头（providers.upstream_headers）。
+	errKindClientOutdated = "client_outdated"
 	// errKindChannelParked WorkBuddy/CodeBuddy 渠道被准入过滤拦下（用户关闭、日限额、
 	// 保留积分、模型冷却）。不是渠道故障，不计熔断；放开条件后自动恢复。
 	errKindChannelParked = "channel_parked"
@@ -56,6 +62,37 @@ func classifyUpstreamStatus(status int) string {
 		return errKindUpstream4xx
 	}
 	return errKindTransport
+}
+
+// isClientOutdatedErr 判定上游是否在拒绝「客户端版本过低」。
+//
+// 426 Upgrade Required 直接命中；其余 4xx 看上游错误摘要（已按隐私边界提取的
+// 结构化 message）是否同时包含「版本 + 升级 + 客户端」三类语义，避免把
+// 「model version not found」这类参数错误误归为版本淘汰。
+func isClientOutdatedErr(status int, err error) bool {
+	if status == http.StatusUpgradeRequired {
+		return true
+	}
+	if status < 400 || status >= 500 {
+		return false
+	}
+	var ue *UpstreamError
+	if !errors.As(err, &ue) {
+		return false
+	}
+	msg := strings.ToLower(sanitizeErrMessage(ue.Body, ue.ContentType))
+	if msg == "" {
+		return false
+	}
+	hasVersion := strings.Contains(msg, "version") || strings.Contains(msg, "版本")
+	hasUpgrade := strings.Contains(msg, "upgrade") || strings.Contains(msg, "outdated") ||
+		strings.Contains(msg, "too old") || strings.Contains(msg, "not supported") ||
+		strings.Contains(msg, "unsupported") || strings.Contains(msg, "升级") ||
+		strings.Contains(msg, "过低") || strings.Contains(msg, "过旧")
+	hasClient := strings.Contains(msg, "client") || strings.Contains(msg, "客户端") ||
+		strings.Contains(msg, "cli") || strings.Contains(msg, "grok") ||
+		strings.Contains(msg, "codex") || strings.Contains(msg, "agent")
+	return hasVersion && hasUpgrade && hasClient
 }
 
 // sanitizeErrMessage 把上游响应正文压成可落库的错误摘要。

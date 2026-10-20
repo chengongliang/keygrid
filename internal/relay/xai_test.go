@@ -110,7 +110,7 @@ func TestUpstreamCallXAIStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildXAIRequest: %v", err)
 	}
-	status, usage, err := h.upstreamCallXAI(t.Context(), h.HTTPClient, up.URL+"/v1/responses", "tok-xai", body, true, protoOpenAI, w, "")
+	status, usage, err := h.upstreamCallXAI(t.Context(), h.HTTPClient, up.URL+"/v1/responses", "tok-xai", body, true, protoOpenAI, w, "", nil)
 	if err != nil {
 		t.Fatalf("upstreamCallXAI: %v", err)
 	}

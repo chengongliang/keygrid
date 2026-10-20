@@ -33,6 +33,10 @@ const providers = {
   uaModeForward: 'Force forward client (incl. Codex)',
   uaPlaceholder: 'e.g. MyApp/1.0',
   uaHint: 'By default the client User-Agent is forwarded to the upstream as-is (pi-agent / codex / claude …) so the upstream sees the real client. Codex channels keep codex_cli_rs by default (the upstream depends on it).',
+  upstreamHeadersLabel: 'Extra upstream headers',
+  upstreamHeadersPlaceholder: 'One per line, Name: Value\ne.g. x-grok-client-version: 1.0.62',
+  upstreamHeadersHint: 'Overrides same-named request headers when forwarding, so upstream client-fingerprint headers the upstream validates strictly (e.g. x-grok-client-version) can be bumped without waiting for a platform release. Auth / message-shape headers (Authorization, Cookie, Host, Content-Type, User-Agent …) cannot be overridden; use the UA policy above for User-Agent. Changes apply immediately — when failures show the "client version outdated" kind, adjust this first.',
+  errUpstreamHeaders: 'Invalid extra headers: one "Name: Value" per line; header names cannot contain spaces or colons',
 
   // ---- Health view (table) ----
   viewCards: 'Cards',

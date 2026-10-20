@@ -463,7 +463,7 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 		case protoResponses:
 			if IsXAIProvider(cand.provider) {
 				status, usage, callErr = h.upstreamCallXAI(r.Context(), client, target, apiKey,
-					upstreamBody, req.Stream, entry, w, ua)
+					upstreamBody, req.Stream, entry, w, ua, cand.provider)
 			} else {
 				status, usage, callErr = h.upstreamCallCodex(r.Context(), client, target, apiKey,
 					tokenExtra["chatgptAccountId"], upstreamBody, req.Stream, entry, w, cand.provider, ua)
@@ -473,7 +473,7 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 				apiKey, upstreamBody, req.Stream, entry, responseWriter, ua)
 		default:
 			status, usage, callErr = h.upstreamCall(r.Context(), client, target, apiKey,
-				upstreamBody, req.Stream, entry, responseWriter, ua, wbExtra, wbPlan.ForceStream)
+				upstreamBody, req.Stream, entry, responseWriter, ua, wbExtra, wbPlan.ForceStream, cand.provider)
 		}
 
 		// 记账（含失败请求：tokens=0，status/latency 保留）
@@ -510,6 +510,11 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 			switch {
 			case status >= 400:
 				kind = classifyUpstreamStatus(status)
+				// 上游要求更新客户端版本（4xx/426 + 错误摘要命中版本关键字）：单独
+				// 分类，前端提示去改渠道附加头（x-grok-client-version 等）而不是猜参数。
+				if isClientOutdatedErr(status, callErr) {
+					kind = errKindClientOutdated
+				}
 			case status >= 200 && status < 300:
 				// 流式响应已开始后上游中断（客户端看到截断）
 				kind = errKindStreamAborted
@@ -755,7 +760,8 @@ func maintSuffix(text string) string {
 // entry=messages/responses：响应需回转成入口格式（经 relayAgg / 流式桥）。
 // client 由调用方按渠道代理开关选定（clientFor）。
 // extra 为渠道特化的额外请求头（WorkBuddy 身分头；一般为 nil）；
-// forceStream 表示上游只能流式（客户端要非流式时由本函数折叠成单条 JSON）。
+// forceStream 表示上游只能流式（客户端要非流式时由本函数折叠成单条 JSON）；
+// p 非空时落地渠道级附加头（providers.upstream_headers）。
 // 返回 (HTTP 状态码, usage 记录, 错误)。
 func (h *Handler) upstreamCall(
 	ctx context.Context,
@@ -769,6 +775,7 @@ func (h *Handler) upstreamCall(
 	ua string,
 	extra http.Header,
 	forceStream bool,
+	p *model.Provider,
 ) (int, UsageRecord, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, strings.NewReader(string(body)))
 	if err != nil {
@@ -796,6 +803,9 @@ func (h *Handler) upstreamCall(
 	} else {
 		req.Header.Set("Accept", "application/json")
 	}
+	// 渠道级附加头（providers.upstream_headers）最后落地：用户显式配置优先，
+	// 但黑名单已在写库与写入两处拦下鉴权/报文形状头。
+	ApplyUpstreamHeaders(req.Header, p)
 
 	upResp, err := client.Do(req)
 	if err != nil {

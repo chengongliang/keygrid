@@ -321,7 +321,7 @@ func TestUpstreamOpenAIEntryResponsesNonStream(t *testing.T) {
 
 	h := NewHandler(nil)
 	w := httptest.NewRecorder()
-	status, usage, err := h.upstreamCall(t.Context(), h.HTTPClient, up.URL+"/v1/chat/completions", "sk", upBody, false, protoResponses, w, "", nil, false)
+	status, usage, err := h.upstreamCall(t.Context(), h.HTTPClient, up.URL+"/v1/chat/completions", "sk", upBody, false, protoResponses, w, "", nil, false, nil)
 	if err != nil {
 		t.Fatalf("upstreamCall: %v", err)
 	}
@@ -368,7 +368,7 @@ func TestUpstreamOpenAIEntryMessagesNonStream(t *testing.T) {
 
 	h := NewHandler(nil)
 	w := httptest.NewRecorder()
-	status, usage, err := h.upstreamCall(t.Context(), h.HTTPClient, up.URL, "sk", upBody, false, protoAnthropic, w, "", nil, false)
+	status, usage, err := h.upstreamCall(t.Context(), h.HTTPClient, up.URL, "sk", upBody, false, protoAnthropic, w, "", nil, false, nil)
 	if err != nil {
 		t.Fatalf("upstreamCall: %v", err)
 	}

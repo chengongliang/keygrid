@@ -20,6 +20,7 @@ const KIND_META: Record<string, { key: string; cls: string }> = {
   upstream_5xx: { key: 'kindUpstream5xx', cls: 'badge-red' },
   transport: { key: 'kindTransport', cls: 'badge-red' },
   stream_aborted: { key: 'kindStreamAborted', cls: 'badge-red' },
+  client_outdated: { key: 'kindClientOutdated', cls: 'badge-yellow' },
 }
 
 const fmtTime = (iso: string) => {

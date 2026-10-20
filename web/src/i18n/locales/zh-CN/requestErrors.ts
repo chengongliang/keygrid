@@ -23,4 +23,5 @@ export default {
   kindUpstream5xx: '上游 5xx',
   kindTransport: '网络/连接',
   kindStreamAborted: '流中断',
+  kindClientOutdated: '客户端版本过低',
 }

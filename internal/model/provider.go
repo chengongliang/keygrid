@@ -34,6 +34,11 @@ type Provider struct {
 	UAMode string `gorm:"not null;default:''" json:"ua_mode"`
 	// UserAgent UAMode=custom 时的 UA 值（禁 CR/LF，≤256）；其余模式忽略。
 	UserAgent string `gorm:"not null;default:''" json:"user_agent"`
+	// UpstreamHeaders 渠道级上游附加请求头：转发时在平台/身份头之后落地（覆盖同名头），
+	// 用于不改代码跟进上游强校验的客户端指纹头（如 x-grok-client-version）。
+	// 敏感头（Authorization / Cookie / Host / x-api-key / User-Agent …）由 relay 层
+	// 黑名单拒绝，UA 一律走 UAMode；见 relay/upstream_headers.go。
+	UpstreamHeaders map[string]string `gorm:"serializer:json;type:jsonb" json:"upstream_headers,omitempty"`
 	// UseProxy 渠道上游请求是否走平台代理（管理员在系统设置统一配置 proxy_url，
 	// 用户只能勾选是否启用；如 OpenAI 需代理才能访问）。
 	UseProxy bool `json:"use_proxy"`

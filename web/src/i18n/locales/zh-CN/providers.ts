@@ -33,6 +33,10 @@ const providers = {
   uaModeForward: '强制透传客户端（含 Codex）',
   uaPlaceholder: '例如 MyApp/1.0',
   uaHint: '默认把客户端的 User-Agent 原样透传给上游（pi-agent / codex / claude 等），便于上游识别；Codex 渠道默认仍用 codex_cli_rs（上游强依赖该标识）。',
+  upstreamHeadersLabel: '上游附加请求头',
+  upstreamHeadersPlaceholder: '每行一条，格式 Name: Value\n例如 x-grok-client-version: 1.0.62',
+  upstreamHeadersHint: '转发时覆盖同名请求头，用于跟进上游强校验的客户端指纹头（如 x-grok-client-version），上游抬高最低版本时不必等平台发版。鉴权/报文形状相关的头（Authorization、Cookie、Host、Content-Type、User-Agent 等）不允许覆盖；User-Agent 请用上方 UA 策略配置。改动即时生效，失败详情里出现「客户端版本过低」分类时优先在这里调整。',
+  errUpstreamHeaders: '附加请求头格式不正确：每行一条「Name: Value」，头名不能包含空格或冒号',
 
   // ---- 健康视图（表格）----
   viewCards: '卡片',
