@@ -13,6 +13,7 @@ import (
 	"github.com/chengongliang/keygrid/internal/model"
 	"github.com/chengongliang/keygrid/internal/oauth"
 	"github.com/chengongliang/keygrid/internal/op"
+	"github.com/chengongliang/keygrid/internal/qoder"
 	"github.com/chengongliang/keygrid/internal/relay"
 	"github.com/chengongliang/keygrid/internal/server/middleware"
 	"github.com/chengongliang/keygrid/internal/server/resp"
@@ -89,6 +90,36 @@ func (h *TestHandler) TestProvider(w http.ResponseWriter, r *http.Request) {
 		resp.JSON(w, http.StatusOK, map[string]any{"code": 0, "data": res})
 		return
 	}
+	// Qoder：上游没有 OpenAI 兼容端点（/v1/chat/completions 实测 404），测连改为
+	// 打 userinfo（PAT 先兑换 jt-），与 9router 的 qoder testUtils 同策略 ——
+	// 既验证凭据真实有效，也不会消耗对话额度。
+	if qoder.IsQoder(p) {
+		rt := qoder.Default()
+		rc, rerr := rt.ResolveCredential(r.Context(), client, qoder.RegionOf(p), secret, credExtra)
+		if rerr != nil {
+			res.Status = qoderErrorStatus(rerr)
+			res.Error = "qoder credential probe failed: " + rerr.Error()
+			resp.JSON(w, http.StatusOK, map[string]any{"code": 0, "data": res})
+			return
+		}
+		start := time.Now()
+		info, ierr := qoder.FetchUserInfo(r.Context(), client, rc.Region, rc.Token)
+		res.LatencyMs = time.Since(start).Milliseconds()
+		switch {
+		case ierr != nil:
+			res.Status = qoderErrorStatus(ierr)
+			res.Error = "upstream rejected credential (" + ierr.Error() + ")"
+		case info.UserID == "":
+			res.Status = http.StatusOK
+			res.Error = "reachable but upstream returned no user id"
+		default:
+			res.Status = http.StatusOK
+			res.OK = true
+		}
+		resp.JSON(w, http.StatusOK, map[string]any{"code": 0, "data": res})
+		return
+	}
+
 	status, latency, body := probeUpstream(r.Context(), client, p, secret, credExtra["chatgptAccountId"], modelName)
 	res.Status = status
 	res.LatencyMs = latency

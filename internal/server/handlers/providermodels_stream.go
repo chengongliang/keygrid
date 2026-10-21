@@ -105,7 +105,7 @@ func (h *TestHandler) TestModelStream(w http.ResponseWriter, r *http.Request) {
 	}
 	res.Prompt = prompt
 
-	secret, accountID, errMsg := h.probeSecret(p)
+	secret, credExtra, errMsg := h.probeSecret(p)
 	if errMsg != "" {
 		res.Error = errMsg
 		emit()
@@ -119,7 +119,7 @@ func (h *TestHandler) TestModelStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	upReq, err := buildUpstreamChatProbeReq(r.Context(), p, secret, accountID, res.Model, prompt, maxTokens, true, h.workBuddyTokenSet(p))
+	upReq, err := buildUpstreamChatProbeReq(r.Context(), p, secret, credExtra["chatgptAccountId"], res.Model, prompt, maxTokens, true, h.workBuddyTokenSet(p))
 	if err != nil {
 		res.Error = err.Error()
 		emit()

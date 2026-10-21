@@ -11,6 +11,7 @@ func init() {
 	oauth.Register(Anthropic{})
 	oauth.Register(IFlow{})
 	oauth.Register(Qoder{})
+	oauth.Register(QoderCN{})
 	oauth.Register(Trae{})
 	oauth.Register(CodeBuddyCN{})
 	oauth.Register(WorkBuddyIntl{})

@@ -7,6 +7,7 @@ KeyGrid 的部分代码与素材移植/改编自以下开源项目。按照其�
 - 仓库：https://github.com/decolua/9router
 - 使用范围：
   - `internal/oauth/providers/`：kimi / openai / anthropic / iflow / qoder / trae / codebuddy 的 OAuth 适配器移植（各文件头有 port 来源标注）
+  - `internal/qoder/`：Qoder COSY 签名、WAF 正文编码、模型目录、上下文档位、附件上传与 SSE 信封拆封（移植自 `open-sse/shared/qoder/*`、`open-sse/services/qoderModels.js`、`open-sse/executors/qoder.js`）
   - `internal/oauth/presets.go`：供应商预设与模型目录数据
   - `web/public/logos/`：供应商图标素材
 - 许可证全文：
@@ -38,7 +39,9 @@ SOFTWARE.
 ## CLIProxyAPI
 
 - 仓库：https://github.com/router-for-me/CLIProxyAPI
-- 使用范围：`internal/oauth/modelcatalog.go` 的模型目录拉取策略对齐其实践
+- 使用范围：
+  - `internal/oauth/modelcatalog.go` 的模型目录拉取策略对齐其实践
+  - `internal/qoder/cosy.go`、`internal/qoder/encoding.go` 的 Qoder 签名/编码算法溯源（经 9router 的 `qoder-provider` 分支移植，原始实现见 CLIProxyAPIPlus `internal/auth/qoder/cosy.go`；RSA 公钥与自定义字母表随 qodercli 客户端分发，仅用于与上游完成协议握手）
 - 许可证全文：
 
 ```text

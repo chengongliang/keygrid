@@ -101,6 +101,10 @@ func TestIFlowResolveAndRefresh(t *testing.T) {
 func TestQoderBeginAndPoll(t *testing.T) {
 	var pollCount int
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/userinfo" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "u-7", "name": "Q", "email": "q@example.com"})
+			return
+		}
 		if !strings.HasPrefix(r.URL.Path, "/api/v1/deviceToken/poll") {
 			w.WriteHeader(404)
 			return
@@ -124,9 +128,8 @@ func TestQoderBeginAndPoll(t *testing.T) {
 	}))
 	defer up.Close()
 
-	orig := qoderDeviceTokenURL
-	defer func() { qoderDeviceTokenURL = orig }()
-	qoderDeviceTokenURL = up.URL + "/api/v1/deviceToken/poll"
+	t.Setenv("QODER_DEVICE_TOKEN_URL", up.URL+"/api/v1/deviceToken/poll")
+	t.Setenv("QODER_USERINFO_URL", up.URL+"/api/v1/userinfo")
 
 	qd := Qoder{}
 	begin, temp, err := qd.BeginAuth(t.Context(), oauth.Callbacks{}, "")

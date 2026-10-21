@@ -130,12 +130,35 @@ var providerPresets = []ProviderPreset{
 		Description: "心流 iFlow（阿里系，免费额度大方）",
 	},
 	{
+		// Qoder 上游没有 OpenAI 兼容面（/v1/chat/completions 与 /v1/models 实测 404）：
+		// 对话/模型目录都是 COSY 签名的私有 /algo 端点，base_url 只留主机名，
+		// 具体路径由 internal/qoder 拼。见 docs/qoder-integration-design.md。
 		Key: "qoder", Kind: "oauth", Protocol: "openai",
-		BaseURL:     "https://api3.qoder.sh",
-		SignupURL:   "https://qoder.com",
-		Models:      []string{"ultimate", "auto", "performance", "efficient", "qmodel_preview", "qmodel_latest", "kmodel_latest", "gm51model", "dmodel", "dfmodel"},
+		BaseURL:   "https://api3.qoder.sh",
+		SignupURL: "https://qoder.com",
+		Models: []string{"ultimate", "auto", "performance", "efficient", "lite",
+			"qmodel_38max", "qmodel_latest", "qmodel", "qfmodel",
+			"kmodel_latest", "kmodel", "gmodel", "gfmodel", "dmodel", "dfmodel", "mmodel"},
 		AuthMode:    "device_token 轮询（本地 PKCE+nonce+machine_id）；也支持 PAT (pt-…)",
-		Description: "Qoder（阿里系 IDE 订阅）",
+		Description: "Qoder 国际站（COSY 签名私有协议）",
+	},
+	{
+		Key: "qoder-cn", Kind: "oauth", Protocol: "openai",
+		BaseURL:     "https://gateway.qoder.com.cn",
+		SignupURL:   "https://qoder.com.cn",
+		Models:      []string{"ultimate", "auto", "performance", "efficient", "lite", "qmodel_38max", "qmodel_latest", "qmodel", "qfmodel", "kmodel_latest", "kmodel", "gmodel", "gfmodel", "dmodel", "dfmodel", "mmodel"},
+		AuthMode:    "device_token 轮询（qoder.com.cn 设备授权）；也支持 PAT (pt-…)",
+		Description: "Qoder 国内站（gateway.qoder.com.cn）",
+	},
+	{
+		// PAT 直填：9router 的 qoder 是 authModes ["oauth","apikey"] 单 provider，
+		// 这里拆成 api_key 预设，用户可直接粘 pt-…（内部自动换 jt- 并签名）。
+		Key: "qoder-pat", Kind: "api_key", Protocol: "openai",
+		BaseURL:     "https://api3.qoder.sh",
+		APIKeyURL:   "https://qoder.com/account/integrations",
+		Models:      []string{"ultimate", "auto", "performance", "efficient", "lite", "qmodel_38max", "qmodel_latest", "qmodel", "qfmodel", "kmodel_latest", "kmodel", "gmodel", "gfmodel", "dmodel", "dfmodel", "mmodel"},
+		AuthMode:    "Personal Access Token（pt-…，自动兑换 jt-）",
+		Description: "Qoder 国际站 PAT 直填",
 	},
 	{
 		Key: "trae", Kind: "oauth", Protocol: "openai",

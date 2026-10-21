@@ -64,6 +64,9 @@ var permanentMarkers = []string{
 	"invalid_grant",
 	// 9router isUnrecoverableRefreshError 另含 invalid_request
 	"invalid_request",
+	// 该 provider 的凭据本身不支持刷新（如 Qoder 的 device token 上游回 403），
+	// 只能重新授权 —— 按不可恢复处理，避免每次请求都白跑一次刷新。
+	"refresh_not_supported",
 }
 
 // ClassifyRefreshError 归类刷新错误：permanent=true → 凭据 revoked；否则择机重试。

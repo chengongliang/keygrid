@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/chengongliang/keygrid/internal/crypto"
 	"github.com/chengongliang/keygrid/internal/model"
 	"github.com/chengongliang/keygrid/internal/oauth"
+	"github.com/chengongliang/keygrid/internal/qoder"
 	"github.com/chengongliang/keygrid/internal/relay"
 	"github.com/chengongliang/keygrid/internal/server/middleware"
 	"github.com/chengongliang/keygrid/internal/server/resp"
@@ -118,9 +120,24 @@ func (h *TestHandler) FetchUpstreamModels(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	secret, _, errMsg := h.probeSecret(p)
+	secret, extra, errMsg := h.probeSecret(p)
 	if errMsg != "" {
 		res.Error = errMsg
+		emit()
+		return
+	}
+
+	// Qoder：上游没有 /v1/models（实测 404），模型目录是 COSY 签名的私有
+	// /algo/api/v2/model/list；返回的目录同时也是转发路径必需的 model_config 来源。
+	if qoder.IsQoder(p) {
+		models, status, qerr := h.qoderModels(r.Context(), client, p, secret, extra)
+		res.Status = status
+		if qerr != "" {
+			res.Error = qerr
+		} else {
+			res.OK = true
+			res.Models = models
+		}
 		emit()
 		return
 	}
@@ -287,19 +304,36 @@ func (h *TestHandler) ProbeModels(w http.ResponseWriter, r *http.Request) {
 
 	// 凭据：显式 api_key 优先，否则用存储凭据
 	secret := strings.TrimSpace(req.APIKey)
+	var credExtra map[string]string
 	if secret == "" {
 		if p == nil {
 			res.Error = "api_key or provider_id required"
 			emit()
 			return
 		}
-		s, _, errMsg := h.probeCredential(p)
+		s, extra, errMsg := h.probeCredential(p)
 		if errMsg != "" {
 			res.Error = errMsg
 			emit()
 			return
 		}
 		secret = s
+		credExtra = extra
+	}
+
+	// Qoder：表单里点「拉取模型」走的正是本接口，必须与 FetchUpstreamModels
+	// 同策略（COSY 签名 + /algo 目录），否则必然 404。
+	if qoder.IsQoder(catalogP) {
+		models, status, qerr := h.qoderModels(r.Context(), client, catalogP, secret, credExtra)
+		res.Status = status
+		if qerr != "" {
+			res.Error = qerr
+		} else {
+			res.OK = true
+			res.Models = models
+		}
+		emit()
+		return
 	}
 
 	models, status, errMsg := fetchAndParseUpstreamModels(r.Context(), client, baseURL, secret)
@@ -407,7 +441,7 @@ func (h *TestHandler) TestModel(w http.ResponseWriter, r *http.Request) {
 	}
 	res.Prompt = prompt
 
-	secret, accountID, errMsg := h.probeSecret(p)
+	secret, credExtra, errMsg := h.probeSecret(p)
 	if errMsg != "" {
 		res.Error = errMsg
 		emit()
@@ -420,7 +454,7 @@ func (h *TestHandler) TestModel(w http.ResponseWriter, r *http.Request) {
 		emit()
 		return
 	}
-	pr := probeUpstreamChat(r.Context(), client, p, secret, accountID, res.Model, prompt, maxTokens, req.Stream, h.workBuddyTokenSet(p))
+	pr := probeUpstreamChat(r.Context(), client, p, secret, credExtra["chatgptAccountId"], res.Model, prompt, maxTokens, req.Stream, h.workBuddyTokenSet(p))
 	res.Status = pr.Status
 	res.LatencyMs = pr.LatencyMs
 	if req.Stream {
@@ -705,27 +739,54 @@ func readStreamChat(body io.Reader, start time.Time) chatProbe {
 
 // probeSecret 已存渠道探测公共前置：SSRF 校验 + 凭据检查 + 解密上游密钥。
 // 返回 errMsg 非空表示失败（已含可读原因），由调用方直接作为 res.Error 透出。
-func (h *TestHandler) probeSecret(p *model.Provider) (string, string, string) {
+func (h *TestHandler) probeSecret(p *model.Provider) (string, map[string]string, string) {
 	if err := ssrf.CheckBaseURL(p.BaseURL); err != nil {
-		return "", "", err.Error()
+		return "", nil, err.Error()
 	}
 	return h.probeCredential(p)
 }
 
 // probeCredential 凭据检查 + 解密（不含 SSRF，base_url 可能被探测请求覆盖）。
-func (h *TestHandler) probeCredential(p *model.Provider) (string, string, string) {
+func (h *TestHandler) probeCredential(p *model.Provider) (string, map[string]string, string) {
 	cred, err := h.Op.GetCredentialByProviderID(p.ID)
 	if err != nil {
-		return "", "", "credential not configured (oauth not authorized yet?)"
+		return "", nil, "credential not configured (oauth not authorized yet?)"
 	}
 	if cred.Status == "revoked" {
-		return "", "", "credential revoked, re-auth required"
+		return "", nil, "credential revoked, re-auth required"
 	}
 	secret, extra, err := credentialSecretForTest(cred)
 	if err != nil {
-		return "", "", err.Error()
+		return "", nil, err.Error()
 	}
-	return secret, extra["chatgptAccountId"], ""
+	return secret, extra, ""
+}
+
+// qoderModels 拉取 Qoder 模型目录（COSY 签名 + PAT 兑换 + userId 兜底全在
+// internal/qoder 里）。force=true：用户点「拉取模型」期望看到上游最新目录。
+func (h *TestHandler) qoderModels(ctx context.Context, client *http.Client, p *model.Provider, secret string, extra map[string]string) ([]string, int, string) {
+	rt := qoder.Default()
+	rc, err := rt.ResolveCredential(ctx, client, qoder.RegionOf(p), secret, extra)
+	if err != nil {
+		return nil, qoderErrorStatus(err), err.Error()
+	}
+	cat, err := rt.Catalog(ctx, client, rc, true)
+	if err != nil {
+		return nil, qoderErrorStatus(err), err.Error()
+	}
+	return cat.ModelKeys(), http.StatusOK, ""
+}
+
+// qoderErrorStatus 从 Qoder 错误里取上游状态码（未知按 502）。
+func qoderErrorStatus(err error) int {
+	var ue *qoder.UpstreamError
+	if errors.As(err, &ue) && ue.Status >= 400 && ue.Status <= 599 {
+		return ue.Status
+	}
+	if err != nil {
+		return http.StatusBadGateway
+	}
+	return http.StatusOK
 }
 
 // truncateBody 错误摘要截断（上游响应体可能很大，不整体塞进错误信息）。

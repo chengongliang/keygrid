@@ -72,6 +72,8 @@ internal/
     refresh.go              #   刷新调度:提前 5 分钟、Redis 去重锁、错误分类
     flow.go / presets.go    #   授权流程 / 渠道预设模板(GLM、DeepSeek、SiliconFlow 等)
     providers/              #   每个供应商一个文件:kimi.go, openai.go, anthropic.go...
+  qoder/                    # ★ Qoder 私有协议(COSY 签名/WAF 编码/模型目录/档位/附件/SSE 拆封)
+                            #   qoder 上游没有 OpenAI 兼容面,relay/qoder.go 走这条链路
   oidc/                     # OIDC SSO(JWKS 缓存、PKCE、JIT 建号)
   oidc.go 相关状态存储见 model/oidc_state.go
   server/                   # HTTP 层
@@ -122,6 +124,10 @@ THIRD_PARTY_NOTICES.md      # 第三方代码/素材来源与许可声明(9route
 - **改动 relay 转发逻辑**:注意流式(SSE)与非流式两条路径都要覆盖,记账(`usage.go`)在流式下从最后 chunk 的 usage 或累计 delta 取值。
 - **前端新增页面/功能**:改 `web/src/pages/`,文案同步写进 `web/src/i18n/locales/{zh-CN,en}/` 对应域字典(zh/en 两份都要写),跑 `make web-dev` 自测;涉及路由改 `App.tsx`。
 - **新增渠道预设模板**:改 `internal/oauth/presets.go`(自动填 base_url + 模型目录)。
+- **改动 Qoder 渠道**:协议细节集中在 `internal/qoder/`(签名 encoding/cosy、目录 models、请求体
+  request、档位 tier、附件 attachments、SSE 拆封 sse),relay 侧只有 `internal/relay/qoder.go` 一个入口;
+  上游没有 OpenAI 兼容面,不要给 Qoder 渠道拼 `/v1/chat/completions`。设计见
+  `docs/qoder-integration-design.md`;改完跑 `go test ./internal/qoder/ ./internal/relay/`。
 
 ## 注意事项
 

@@ -42,6 +42,11 @@ func channelProto(p *model.Provider) string {
 	if IsResponsesProvider(p) {
 		return protoResponses
 	}
+	// Qoder 只有私有 /algo 协议（见 relay/qoder.go）：即使渠道协议字段被误填成
+	// anthropic，也必须走 qoder 分支，否则会拼出不存在的 /v1/messages。
+	if IsQoderProvider(p) {
+		return protoOpenAI
+	}
 	if p != nil && p.Protocol == "anthropic" {
 		return protoAnthropic
 	}

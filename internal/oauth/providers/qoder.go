@@ -14,30 +14,63 @@ import (
 	"time"
 
 	"github.com/chengongliang/keygrid/internal/oauth"
+	"github.com/chengongliang/keygrid/internal/qoder"
 )
 
-// qoder.go port of 9router src/lib/oauth/services/qoder.js（device-token 变体流程）。
+// qoder.go Qoder device-token 变体设备流（国际站 qoder.com / 国内站 qoder.com.cn）。
 //
-// 与标准 RFC device_code 不同：无 device_authorization 端点，全部本地生成——
+// 与标准 RFC device_code 不同：没有 device_authorization 端点，全部本地生成——
 //  1. 本地生成 PKCE pair + nonce + machine_id
 //  2. 浏览器打开 https://qoder.com/device/selectAccounts?challenge=...&nonce=...&machine_id=...
 //  3. 轮询 GET openapi.qoder.sh/api/v1/deviceToken/poll?nonce=...&verifier=...&challenge_method=S256
 //     - 202/404 = pending；200 + {token} = 成功（dt-... token，约 30 天）
+//  4. 用 token 调 openapi/api/v1/userinfo 取 userId —— COSY 签名必需（9router 同款兜底）
 //
 // 上游 refresh 端点对本流程返回 403（9router 实测）→ Refresh 返回不可恢复错误，
 // 过期后用户需重新授权。
 //
-// PAT 备选（pt-...）：kind=api_key 直填即可（api3 需要 COSY 签名，走 qoder 平台转发不在本任务范围）。
-var (
-	qoderDeviceTokenURL = envOr("QODER_DEVICE_TOKEN_URL", "https://openapi.qoder.sh/api/v1/deviceToken/poll")
-	qoderLoginURL       = envOr("QODER_LOGIN_URL", "https://qoder.com/device/selectAccounts")
-)
+// 授权之后的对话/模型列表不在 OpenAI 兼容面（api3 没有 /v1/*），走
+// internal/qoder 的 COSY 签名 + 私有 /algo 协议；见 internal/relay/qoder.go。
 
-// Qoder Qoder device_token 适配器。
+// Qoder 国际站设备流。
 type Qoder struct{}
 
-func (Qoder) Key() string          { return "qoder" }
-func (Qoder) Flow() oauth.FlowType { return oauth.FlowDeviceCode }
+// QoderCN 国内站设备流（qoder.com.cn，端点为 gateway.qoder.com.cn）。
+type QoderCN struct{}
+
+func (Qoder) Key() string            { return qoder.ProviderIDIntl }
+func (QoderCN) Key() string          { return qoder.ProviderIDCN }
+func (Qoder) Flow() oauth.FlowType   { return oauth.FlowDeviceCode }
+func (QoderCN) Flow() oauth.FlowType { return oauth.FlowDeviceCode }
+
+func (Qoder) BeginAuth(ctx context.Context, cb oauth.Callbacks, _ string) (*oauth.BeginResult, map[string]string, error) {
+	return beginQoderDevice(qoder.RegionIntl)
+}
+
+func (QoderCN) BeginAuth(ctx context.Context, cb oauth.Callbacks, _ string) (*oauth.BeginResult, map[string]string, error) {
+	return beginQoderDevice(qoder.RegionCN)
+}
+
+func (Qoder) Resolve(ctx context.Context, cb oauth.Callbacks, temp map[string]string) (*oauth.TokenSet, error) {
+	return resolveQoderDevice(ctx, cb, qoder.RegionIntl, temp)
+}
+
+func (QoderCN) Resolve(ctx context.Context, cb oauth.Callbacks, temp map[string]string) (*oauth.TokenSet, error) {
+	return resolveQoderDevice(ctx, cb, qoder.RegionCN, temp)
+}
+
+func (Qoder) Refresh(ctx context.Context, cb oauth.Callbacks, tok *oauth.TokenSet) (*oauth.TokenSet, error) {
+	return refreshQoder(ctx, cb, qoder.RegionIntl, tok)
+}
+
+func (QoderCN) Refresh(ctx context.Context, cb oauth.Callbacks, tok *oauth.TokenSet) (*oauth.TokenSet, error) {
+	return refreshQoder(ctx, cb, qoder.RegionCN, tok)
+}
+
+// NeedsRefresh 设备流 token 无法刷新：返回 false 让调度器别在临期时白跑一趟
+// （过期后由上游 401 + 渠道面板提示重新授权）。
+func (Qoder) NeedsRefresh(*oauth.TokenSet, time.Duration) bool   { return false }
+func (QoderCN) NeedsRefresh(*oauth.TokenSet, time.Duration) bool { return false }
 
 // qoderUUID uuid v4（9router: uuidv4()）。
 func qoderUUID() string {
@@ -62,8 +95,8 @@ func qoderPkcePair() (verifier, challenge string) {
 	return
 }
 
-// BeginAuth 本地生成 PKCE+nonce+machineId，拼 device 登录 URL（9router initiateDeviceFlow）。
-func (Qoder) BeginAuth(ctx context.Context, cb oauth.Callbacks, _ string) (*oauth.BeginResult, map[string]string, error) {
+// beginQoderDevice 本地生成 PKCE+nonce+machineId，拼 device 登录 URL。
+func beginQoderDevice(region string) (*oauth.BeginResult, map[string]string, error) {
 	verifier, challenge := qoderPkcePair()
 	nonce := qoderUUID()
 	machineID := qoderUUID()
@@ -74,22 +107,23 @@ func (Qoder) BeginAuth(ctx context.Context, cb oauth.Callbacks, _ string) (*oaut
 		"machine_id":       {machineID},
 		"nonce":            {nonce},
 	}
-	temp := map[string]string{"nonce": nonce, "code_verifier": verifier, "machine_id": machineID}
+	loginURL := qoder.LoginURL(region)
+	temp := map[string]string{"nonce": nonce, "code_verifier": verifier, "machine_id": machineID, "region": region}
 	return &oauth.BeginResult{
-		VerificationURI:     qoderLoginURL,
-		VerificationURIComp: qoderLoginURL + "?" + params.Encode(),
+		VerificationURI:     loginURL,
+		VerificationURIComp: loginURL + "?" + params.Encode(),
 		Interval:            2, // 9router OAuth modal 2s 轮询
 	}, temp, nil
 }
 
-// Resolve 单次轮询 deviceToken/poll（9router pollDeviceToken 1:1）。
+// resolveQoderDevice 单次轮询 deviceToken/poll（9router pollDeviceToken 1:1）。
 // 202/404 = pending；200+token = ok；其他 = 终态错误。
-func (Qoder) Resolve(ctx context.Context, cb oauth.Callbacks, temp map[string]string) (*oauth.TokenSet, error) {
+func resolveQoderDevice(ctx context.Context, cb oauth.Callbacks, region string, temp map[string]string) (*oauth.TokenSet, error) {
 	nonce, verifier := temp["nonce"], temp["code_verifier"]
 	if nonce == "" || verifier == "" {
 		return nil, fmt.Errorf("qoder resolve: nonce/verifier missing")
 	}
-	u := qoderDeviceTokenURL + "?" + url.Values{
+	u := qoder.DeviceTokenURL(region) + "?" + url.Values{
 		"nonce":            {nonce},
 		"verifier":         {verifier},
 		"challenge_method": {"S256"},
@@ -130,18 +164,69 @@ func (Qoder) Resolve(ctx context.Context, cb oauth.Callbacks, temp map[string]st
 	if data.Token == "" {
 		return nil, fmt.Errorf("qoder device token poll returned 200 but no token")
 	}
-	expiresAt := qoderParseExpiry(data.ExpiresAt, data.ExpiresIn, nowFunc(cb))
-	extra := map[string]string{}
-	if data.UserID != "" {
-		extra["userId"] = data.UserID
+	now := nowFunc(cb)
+	// 上游若给出已过期/极短的过期时间，按 9router 的做法兜底到至少 24 小时，
+	// 避免凭据刚落地就临期（进而被兜底刷新判死）。
+	expiresAt := qoderParseExpiry(data.ExpiresAt, data.ExpiresIn, now)
+	if min := now.Add(24 * time.Hour); expiresAt.Before(min) {
+		expiresAt = min
 	}
-	extra["machineId"] = temp["machine_id"]
+
+	extra := map[string]string{
+		"machineId": temp["machine_id"],
+		"region":    region,
+	}
+	userID := data.UserID
+	name, email := "", ""
+	// userId 是 COSY 签名必需项：poll 响应里通常没有，这里补一次 userinfo。
+	if info, ierr := qoder.FetchUserInfo(ctx, cb.HTTPClient, region, data.Token); ierr == nil {
+		if info.UserID != "" {
+			userID = info.UserID
+		}
+		name, email = info.Name, info.Email
+	}
+	if userID != "" {
+		extra["userId"] = userID
+	}
+	if name != "" {
+		extra["name"] = name
+	}
+	if email != "" {
+		extra["email"] = email
+	}
+
 	return &oauth.TokenSet{
 		AccessToken:  data.Token,
 		RefreshToken: data.RefreshToken,
 		ExpiresAt:    expiresAt,
 		Extra:        extra,
 	}, nil
+}
+
+// refreshQoder 设备流 token 不支持刷新：上游 refresh 端点对 dt-… 返回 403。
+// 返回带 refresh_not_supported 标记的 RefreshError，分类器据此把凭据标 revoked，
+// 由用户在渠道面板重新授权。
+func refreshQoder(ctx context.Context, cb oauth.Callbacks, region string, tok *oauth.TokenSet) (*oauth.TokenSet, error) {
+	refreshURL := qoder.RefreshURL(region)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, refreshURL, strings.NewReader("{}"))
+	if err != nil {
+		return nil, &oauth.RefreshError{Status: 0, OAuthError: "refresh_not_supported", Body: err.Error()}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if tok != nil && tok.RefreshToken != "" {
+		req.Header.Set("Authorization", "Bearer "+tok.RefreshToken)
+	}
+
+	status, body := 0, ""
+	if resp, rerr := doHTTP(ctx, cb, req); rerr == nil {
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		status, body = resp.StatusCode, string(raw)
+	} else {
+		body = rerr.Error()
+	}
+	return nil, &oauth.RefreshError{Body: body, Status: status, OAuthError: "refresh_not_supported"}
 }
 
 // qoderParseExpiry 上游过期时间 → 绝对时间（9router QoderService.parseExpiry 1:1）。
@@ -183,34 +268,4 @@ func isAllDigits(s string) bool {
 		}
 	}
 	return true
-}
-
-// Refresh 上游 refresh 端点对 device-token 流程返回 403（9router 实测注释）——
-// 无法刷新 → 按不可恢复处理，凭据 revoked 后由用户重新授权。
-func (Qoder) Refresh(ctx context.Context, cb oauth.Callbacks, tok *oauth.TokenSet) (*oauth.TokenSet, error) {
-	if tok == nil || tok.RefreshToken == "" {
-		return nil, fmt.Errorf("qoder refresh: no refresh_token (device tokens cannot be refreshed; re-auth required)")
-	}
-	// 尝试 center.qoder.sh refresh（9router 同路径）——大概率 403，按错误分类走
-	refreshURL := envOr("QODER_REFRESH_URL", "https://center.qoder.sh/algo/api/v3/user/refresh_token")
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, refreshURL, strings.NewReader("{}"))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+tok.RefreshToken)
-
-	resp, err := doHTTP(ctx, cb, req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	return nil, &oauth.RefreshError{Body: string(body), Status: resp.StatusCode, OAuthError: "refresh_not_supported"}
-}
-
-// NeedsRefresh Qoder 默认提前量。
-func (Qoder) NeedsRefresh(tok *oauth.TokenSet, lead time.Duration) bool {
-	return defaultNeedsRefresh(tok, lead)
 }

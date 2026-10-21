@@ -16,6 +16,7 @@ import (
 	"github.com/chengongliang/keygrid/internal/model"
 	"github.com/chengongliang/keygrid/internal/oauth"
 	"github.com/chengongliang/keygrid/internal/op"
+	"github.com/chengongliang/keygrid/internal/qoder"
 	"github.com/chengongliang/keygrid/internal/quota"
 	"github.com/chengongliang/keygrid/internal/server/middleware"
 	"github.com/chengongliang/keygrid/internal/server/resp"
@@ -44,6 +45,9 @@ type Handler struct {
 	OAuthLead time.Duration
 	// QuotaSyncer 额度同步器（nil = 不做 x-codex-* 响应头被动观察）
 	QuotaSyncer *quota.Syncer
+	// Qoder Qoder 渠道运行时缓存（模型目录 / PAT→job token / userinfo）。
+	// nil = 用包级默认实例（渠道面板与转发共享缓存）。
+	Qoder *qoder.Runtime
 	// Workbuddy WorkBuddy/CodeBuddy 渠道运行态判定（准入过滤/冷却/日限额）。
 	// 用接口而非具体类型：转发侧只需要"能不能放行 + 回填结果"两个动作，
 	// 便于单测注入假实现（真实实现是 *workbuddy.Runtime）。
@@ -109,6 +113,9 @@ type WorkbuddyGate interface {
 	// ScrubModeFor 该渠道当前生效的脱敏档位（off/shadow/on，见 workbuddy/scrub.go）。
 	ScrubModeFor(p *model.Provider) string
 }
+
+// SetQoderRuntime 注入 Qoder 运行时缓存（nil = 用包级默认实例）。
+func (h *Handler) SetQoderRuntime(rt *qoder.Runtime) { h.Qoder = rt }
 
 // SetWorkbuddy 注入 WorkBuddy/CodeBuddy 运行态判定器（nil = 不启用）。
 func (h *Handler) SetWorkbuddy(rt WorkbuddyGate) { h.Workbuddy = rt }
@@ -343,6 +350,7 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 		// 非该供应商时保持 nil / 零值，内核行为与今天完全一致。
 		var wbExtra http.Header
 		var wbPlan workbuddy.Plan
+		qoderMode := false
 		switch proto {
 		case protoResponses:
 			// Codex 与 xAI 都使用 Responses 上游，但请求归一化、会话头和
@@ -400,6 +408,15 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 			}
 			target = upstreamTargetAnthropic(cand.provider.BaseURL)
 		default:
+			// Qoder：上游没有 OpenAI 兼容端点（/v1/chat/completions 实测 404），
+			// 只接受 COSY 签名的私有 /algo 协议。请求体在 upstreamCallQoder 里
+			// 由 internal/qoder 从 pivot 重新构造，这里不做通用 OpenAI 改写。
+			if qoder.IsQoder(cand.provider) {
+				qoderMode = true
+				upstreamBody = req.Pivot
+				target = qoder.ChatURL(qoder.RegionOf(cand.provider), apiKey)
+				break
+			}
 			upstreamBody = buildUpstreamBody(req.Pivot, req.Model, cand.upModel)
 			target = upstreamTarget(cand.provider.BaseURL)
 			// WorkBuddy / CodeBuddy：上游路径是 /v2/chat/completions（内核默认拼的
@@ -472,6 +489,11 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 			status, usage, callErr = h.upstreamCallAnthropic(r.Context(), client, target, cand.provider,
 				apiKey, upstreamBody, req.Stream, entry, responseWriter, ua)
 		default:
+			if qoderMode {
+				status, usage, callErr = h.upstreamCallQoder(r.Context(), client, cand.provider, apiKey,
+					tokenExtra, cand.upModel, upstreamBody, req.Stream, entry, responseWriter, ua)
+				break
+			}
 			status, usage, callErr = h.upstreamCall(r.Context(), client, target, apiKey,
 				upstreamBody, req.Stream, entry, responseWriter, ua, wbExtra, wbPlan.ForceStream, cand.provider)
 		}
