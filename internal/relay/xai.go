@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/chengongliang/keygrid/internal/model"
@@ -18,12 +19,15 @@ const (
 	xaiTokenAuthHeader     = "X-XAI-Token-Auth"
 	xaiTokenAuthValue      = "xai-grok-cli"
 	xaiClientVersionHeader = "x-grok-client-version"
-	xaiClientVersion       = "0.2.120"
-	xaiClientIDHeader      = "x-grok-client-identifier"
-	xaiClientIDValue       = "grok-shell"
-	xaiAuthResponseHeader  = "x-authenticateresponse"
-	xaiAuthResponseValue   = "authenticate-response"
-	xaiConversationHeader  = "x-grok-conv-id"
+	// 上游 426 校验的是本头的版本号（不是 User-Agent），低于最低版直接拒绝。
+	// 渠道设了自定义 UA 时以 UA 里的版本为准（见 xaiVersionFrom），
+	// 上游提版只需改渠道 UA，不必改代码。
+	xaiClientVersion      = "1.0.88"
+	xaiClientIDHeader     = "x-grok-client-identifier"
+	xaiClientIDValue      = "grok-shell"
+	xaiAuthResponseHeader = "x-authenticateresponse"
+	xaiAuthResponseValue  = "authenticate-response"
+	xaiConversationHeader = "x-grok-conv-id"
 )
 
 // IsXAIProvider 判断是否为 xAI Grok OAuth 渠道。
@@ -56,9 +60,31 @@ func NormalizeXAIBaseURL(baseURL string) string {
 	return t + "/responses"
 }
 
+// xaiVersionPattern 从 Grok 客户端 UA 里提取版本号（如 "grok-cli/1.0.88 (Windows ...)"）。
+// 只认 grok-cli / xai-grok-workspace 前缀，避免从 Windows 版本号等无关字段误取。
+var xaiVersionPattern = regexp.MustCompile(`(?i)(?:grok-cli|xai-grok-workspace)/(\d+\.\d+\.\d+)`)
+
+// xaiVersionFrom 用渠道自定义 UA 里的版本号作为 Grok CLI 版本；取不到时回退默认值。
+func xaiVersionFrom(customUA string) string {
+	if m := xaiVersionPattern.FindStringSubmatch(customUA); m != nil {
+		return m[1]
+	}
+	return xaiClientVersion
+}
+
+// XAIVersionUA 返回可用于派生 x-grok-client-version 的渠道 UA（仅 custom 模式）。
+func XAIVersionUA(p *model.Provider) string {
+	if p != nil && p.UAMode == UAModeCustom {
+		return p.UserAgent
+	}
+	return ""
+}
+
 // XAIUpstreamHeaders 构建 xAI Responses 请求头。Grok Build 身份头只对官方
 // cli-chat-proxy endpoint 生效，避免用户填写自定义兼容 endpoint 时收到无关头。
-func XAIUpstreamHeaders(token, target, sessionID string) http.Header {
+// customUA 非空时其版本号同时决定 x-grok-client-version 与兜底 UA。
+func XAIUpstreamHeaders(token, target, sessionID, customUA string) http.Header {
+	version := xaiVersionFrom(customUA)
 	h := http.Header{}
 	h.Set("Content-Type", "application/json")
 	h.Set("Authorization", "Bearer "+token)
@@ -69,10 +95,10 @@ func XAIUpstreamHeaders(token, target, sessionID string) http.Header {
 	}
 	if isXAIChatProxyEndpoint(target) {
 		h.Set(xaiTokenAuthHeader, xaiTokenAuthValue)
-		h.Set(xaiClientVersionHeader, xaiClientVersion)
+		h.Set(xaiClientVersionHeader, version)
 		h.Set(xaiClientIDHeader, xaiClientIDValue)
 		h.Set(xaiAuthResponseHeader, xaiAuthResponseValue)
-		h.Set("User-Agent", "xai-grok-workspace/"+xaiClientVersion)
+		h.Set("User-Agent", "xai-grok-workspace/"+version)
 	}
 	return h
 }
@@ -182,12 +208,13 @@ func (h *Handler) upstreamCallXAI(
 	entry string,
 	w http.ResponseWriter,
 	ua string,
+	customUA string,
 ) (int, UsageRecord, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, strings.NewReader(string(body)))
 	if err != nil {
 		return 0, UsageRecord{}, err
 	}
-	for k, vs := range XAIUpstreamHeaders(token, target, codexSessionFromBody(body)) {
+	for k, vs := range XAIUpstreamHeaders(token, target, codexSessionFromBody(body), customUA) {
 		for _, v := range vs {
 			req.Header.Add(k, v)
 		}

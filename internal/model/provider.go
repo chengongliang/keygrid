@@ -7,6 +7,7 @@ type Provider struct {
 	ID       int64  `gorm:"primaryKey" json:"id"`
 	UserID   int64  `gorm:"index;not null" json:"user_id"`
 	Name     string `json:"name"`
+	Remark   string `gorm:"type:text" json:"remark,omitempty"`
 	Kind     string `json:"kind"`     // api_key | oauth
 	Protocol string `json:"protocol"` // openai | anthropic | gemini
 	BaseURL  string `json:"base_url"`

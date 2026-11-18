@@ -17,6 +17,7 @@ const providers = {
 
   // ---- 表单公共字段（向导 / 编辑弹窗复用）----
   nameLabel: '展示名 *',
+  remarkLabel: '备注（可选）',
   protocolLabel: '协议',
   priorityLabel: '优先级（大者优先）',
   proxyAccess: '通过平台代理访问',

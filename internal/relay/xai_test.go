@@ -62,7 +62,7 @@ func TestBuildXAIRequestRestoresResponsesControls(t *testing.T) {
 }
 
 func TestXAIUpstreamHeadersOfficialOnly(t *testing.T) {
-	official := XAIUpstreamHeaders("tok", "https://cli-chat-proxy.grok.com/v1/responses", "conv-1")
+	official := XAIUpstreamHeaders("tok", "https://cli-chat-proxy.grok.com/v1/responses", "conv-1", "")
 	for key, want := range map[string]string{
 		xaiTokenAuthHeader:     xaiTokenAuthValue,
 		xaiClientVersionHeader: xaiClientVersion,
@@ -75,7 +75,19 @@ func TestXAIUpstreamHeadersOfficialOnly(t *testing.T) {
 			t.Errorf("official header %s = %q, want %q", key, got, want)
 		}
 	}
-	custom := XAIUpstreamHeaders("tok", "https://relay.example/v1/responses", "")
+	// 渠道自定义 UA 的版本号覆盖 x-grok-client-version（上游提版无需改代码）
+	customUA := XAIUpstreamHeaders("tok", "https://cli-chat-proxy.grok.com/v1/responses", "",
+		"grok-cli/9.9.9 (Windows 10.0.26200; x64)")
+	if got := customUA.Get(xaiClientVersionHeader); got != "9.9.9" {
+		t.Errorf("custom UA version = %q, want 9.9.9", got)
+	}
+	// 非 Grok 客户端 UA 不参与派生，回退默认版本
+	browserUA := XAIUpstreamHeaders("tok", "https://cli-chat-proxy.grok.com/v1/responses", "",
+		"Mozilla/5.0 (Windows NT 10.0.26200; x64)")
+	if got := browserUA.Get(xaiClientVersionHeader); got != xaiClientVersion {
+		t.Errorf("browser UA version = %q, want default %q", got, xaiClientVersion)
+	}
+	custom := XAIUpstreamHeaders("tok", "https://relay.example/v1/responses", "", "")
 	if custom.Get(xaiTokenAuthHeader) != "" || custom.Get(xaiClientVersionHeader) != "" {
 		t.Fatalf("custom endpoint received Grok Build headers: %v", custom)
 	}
@@ -110,7 +122,7 @@ func TestUpstreamCallXAIStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildXAIRequest: %v", err)
 	}
-	status, usage, err := h.upstreamCallXAI(t.Context(), h.HTTPClient, up.URL+"/v1/responses", "tok-xai", body, true, protoOpenAI, w, "")
+	status, usage, err := h.upstreamCallXAI(t.Context(), h.HTTPClient, up.URL+"/v1/responses", "tok-xai", body, true, protoOpenAI, w, "", "")
 	if err != nil {
 		t.Fatalf("upstreamCallXAI: %v", err)
 	}

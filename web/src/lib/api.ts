@@ -23,6 +23,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   })
   const data = await res.json().catch(() => ({}))
   if (!res.ok) {
+    if (res.status === 401 && token) window.dispatchEvent(new Event('auth:expired'))
     throw new ApiError(res.status, data.code ?? res.status, data.message ?? data.error?.message ?? res.statusText)
   }
   // 统一响应 {code:0, data}
@@ -43,6 +44,7 @@ export interface User { id: number; email: string; name?: string; role: string; 
 export interface Provider {
   id: number
   name: string
+  remark?: string
   kind: 'api_key' | 'oauth'
   protocol: string
   base_url: string

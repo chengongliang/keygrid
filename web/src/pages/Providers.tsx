@@ -16,6 +16,7 @@ type WizardState = {
   kind: 'api_key' | 'oauth'
   presetKey: string // 选中的预设 key（'' = 自定义）
   name: string
+  remark: string
   nameTouched: boolean // 展示名是否被手动编辑过：未编辑时切换渠道自动跟随预设 key
   protocol: string
   base_url: string
@@ -30,7 +31,7 @@ type WizardState = {
 }
 
 const emptyWizard: WizardState = {
-  step: 1, kind: 'api_key', presetKey: '', name: '', nameTouched: false, protocol: 'openai', base_url: '',
+  step: 1, kind: 'api_key', presetKey: '', name: '', remark: '', nameTouched: false, protocol: 'openai', base_url: '',
   oauth_provider: 'kimi', api_key: '', model_map_text: '', priority: 0, use_proxy: false, breaker_check: false,
   ua_mode: '', user_agent: '',
 }
@@ -42,6 +43,7 @@ type EditForm = {
   kind: 'api_key' | 'oauth'
   oauth_provider: string
   name: string
+  remark: string
   protocol: string
   base_url: string
   priority: number
@@ -61,6 +63,7 @@ const toEditForm = (p: Provider): EditForm => ({
   kind: p.kind,
   oauth_provider: p.oauth_provider ?? '',
   name: p.name,
+  remark: p.remark ?? '',
   protocol: p.protocol,
   base_url: p.base_url,
   priority: p.priority,
@@ -405,6 +408,7 @@ export default function Providers() {
     }
     const body: Record<string, unknown> = {
       name: wiz.name, kind: wiz.kind, protocol: wiz.protocol,
+      remark: wiz.remark,
       model_map, priority: wiz.priority,
       use_proxy: wiz.use_proxy,
       breaker_check: wiz.breaker_check,
@@ -438,6 +442,7 @@ export default function Providers() {
     }
     const body: Record<string, unknown> = {
       name: editForm.name, protocol: editForm.protocol,
+      remark: editForm.remark,
       priority: editForm.priority, enabled: editForm.enabled,
       use_proxy: editForm.use_proxy,
       breaker_check: editForm.breaker_check,
@@ -760,6 +765,7 @@ export default function Providers() {
                 <QuotaCard snap={quotaMap[p.id]} onOpen={() => openModal(() => { resetProbe(); setQuotaModal(p) })} />
               )}
               <div className="truncate text-xs text-muted" title={p.base_url}>{p.base_url}</div>
+              {p.remark && <div className="line-clamp-2 break-words text-sm text-muted" title={p.remark}>{p.remark}</div>}
               {p.model_map && Object.keys(p.model_map).length > 0 && (
                 <div className="flex flex-wrap gap-1">
                   {Object.keys(p.model_map).slice(0, 4).map((m) => (
@@ -845,6 +851,10 @@ export default function Providers() {
               <div>
                 <label className="label">{t('providers.nameLabel')}</label>
                 <input className="input" value={wiz.name} onChange={(e) => setWiz({ ...wiz, name: e.target.value, nameTouched: true })} placeholder={wiz.kind === 'oauth' ? t('providers.wizard.namePhOauth') : t('providers.wizard.namePhApi')} />
+              </div>
+              <div>
+                <label className="label">{t('providers.remarkLabel')}</label>
+                <textarea className="input" rows={2} value={wiz.remark} onChange={(e) => setWiz({ ...wiz, remark: e.target.value })} />
               </div>
               {wiz.kind === 'oauth' && (
                 <div>
@@ -1249,6 +1259,10 @@ export default function Providers() {
             <div>
               <label className="label">{t('providers.nameLabel')}</label>
               <input className="input" value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} placeholder={t('providers.wizard.namePhApi')} />
+            </div>
+            <div>
+              <label className="label">{t('providers.remarkLabel')}</label>
+              <textarea className="input" rows={2} value={editForm.remark} onChange={(e) => setEditForm({ ...editForm, remark: e.target.value })} />
             </div>
             {editForm.kind === 'oauth' && (
               <div>

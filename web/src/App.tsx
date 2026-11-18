@@ -1,23 +1,24 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import {
   Server, KeyRound, BarChart3, Users2, Gauge, SlidersHorizontal,
   Settings, Menu, LogOut, ChevronRight, DollarSign, Activity,
   PanelLeftClose, PanelLeftOpen,
 } from 'lucide-react'
-import Login from '@/pages/Login'
-import Providers from '@/pages/Providers'
-import ApiKeys from '@/pages/ApiKeys'
-import Usage from '@/pages/Usage'
-import SettingsPage from '@/pages/Settings'
-import AdminUsers from '@/pages/AdminUsers'
-import AdminProviders from '@/pages/AdminProviders'
-import AdminUsage from '@/pages/AdminUsage'
-import AdminPrices from '@/pages/AdminPrices'
-import AdminSettings from '@/pages/AdminSettings'
 import { api, type User } from '@/lib/api'
 import { ThemeToggle } from '@/lib/theme'
 import { LanguageToggle } from '@/i18n/LanguageToggle'
 import { useTranslation } from 'react-i18next'
+
+const Login = lazy(() => import('@/pages/Login'))
+const Providers = lazy(() => import('@/pages/Providers'))
+const ApiKeys = lazy(() => import('@/pages/ApiKeys'))
+const Usage = lazy(() => import('@/pages/Usage'))
+const SettingsPage = lazy(() => import('@/pages/Settings'))
+const AdminUsers = lazy(() => import('@/pages/AdminUsers'))
+const AdminProviders = lazy(() => import('@/pages/AdminProviders'))
+const AdminUsage = lazy(() => import('@/pages/AdminUsage'))
+const AdminPrices = lazy(() => import('@/pages/AdminPrices'))
+const AdminSettings = lazy(() => import('@/pages/AdminSettings'))
 
 type Tab = 'providers' | 'keys' | 'usage' | 'settings' | 'admin_users' | 'admin_providers' | 'admin_usage' | 'admin_prices' | 'admin_settings'
 
@@ -126,12 +127,18 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    const onExpired = () => {
+      if (localStorage.getItem('token')) logout('expired')
+    }
+    window.addEventListener('auth:expired', onExpired)
+    return () => window.removeEventListener('auth:expired', onExpired)
+  }, [logout])
+
+  useEffect(() => {
     if (!token) return
     api.get<User>('/api/auth/me')
       .then(setUser)
-      .catch((e) => {
-        if (e.status === 401) logout()
-      })
+      .catch(() => {})
   }, [token, logout])
 
   // 平台公告（登录后轮询一次；维护提示对全员可见）
@@ -154,18 +161,20 @@ export default function App() {
 
   if (!token) {
     return (
-      <Login
-        expired={expired}
-        onLoggedIn={(t, u) => {
-          localStorage.setItem('token', t)
-          localStorage.setItem('user', JSON.stringify(u))
-          setToken(t)
-          setUser(u)
-          setExpired(false)
-          // 新登录：admin 首次落入默认首页（无明确意图 hash 时）
-          justLoggedIn.current = true
-        }}
-      />
+      <Suspense fallback={null}>
+        <Login
+          expired={expired}
+          onLoggedIn={(t, u) => {
+            localStorage.setItem('token', t)
+            localStorage.setItem('user', JSON.stringify(u))
+            setToken(t)
+            setUser(u)
+            setExpired(false)
+            // 新登录：admin 首次落入默认首页（无明确意图 hash 时）
+            justLoggedIn.current = true
+          }}
+        />
+      </Suspense>
     )
   }
 
@@ -333,6 +342,7 @@ export default function App() {
         )}
         <main className="flex-1 px-4 py-6 sm:px-6">
           <div className="mx-auto max-w-6xl">
+            <Suspense fallback={null}>
             {activeTab === 'providers' && <Providers />}
             {activeTab === 'keys' && <ApiKeys />}
             {activeTab === 'usage' && <Usage />}
@@ -342,6 +352,7 @@ export default function App() {
             {activeTab === 'admin_usage' && <AdminUsage />}
             {activeTab === 'admin_prices' && <AdminPrices />}
             {activeTab === 'admin_settings' && <AdminSettings />}
+            </Suspense>
           </div>
         </main>
       </div>

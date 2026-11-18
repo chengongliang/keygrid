@@ -369,7 +369,7 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 		case protoResponses:
 			if IsXAIProvider(cand.provider) {
 				status, usage, callErr = h.upstreamCallXAI(r.Context(), client, target, apiKey,
-					upstreamBody, req.Stream, entry, w, ua)
+					upstreamBody, req.Stream, entry, w, ua, XAIVersionUA(cand.provider))
 			} else {
 				status, usage, callErr = h.upstreamCallCodex(r.Context(), client, target, apiKey,
 					tokenExtra["chatgptAccountId"], upstreamBody, req.Stream, entry, w, cand.provider, ua)

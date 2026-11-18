@@ -420,7 +420,7 @@ func buildUpstreamChatProbeReq(ctx context.Context, p *model.Provider, secret, a
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+secret)
 	if relay.IsXAIProvider(p) {
-		for k, vs := range relay.XAIUpstreamHeaders(secret, target, "") {
+		for k, vs := range relay.XAIUpstreamHeaders(secret, target, "", relay.XAIVersionUA(p)) {
 			req.Header.Set(k, vs[0])
 		}
 	} else if relay.IsCodexProvider(p) {

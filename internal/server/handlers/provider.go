@@ -32,6 +32,7 @@ type ProviderHandler struct {
 
 type createProviderReq struct {
 	Name          string            `json:"name"`
+	Remark        string            `json:"remark"`
 	Kind          string            `json:"kind"`     // api_key | oauth
 	Protocol      string            `json:"protocol"` // openai | anthropic | gemini
 	BaseURL       string            `json:"base_url"`
@@ -245,6 +246,7 @@ func (h *ProviderHandler) Create(w http.ResponseWriter, r *http.Request) {
 	p := &model.Provider{
 		UserID:        userID,
 		Name:          req.Name,
+		Remark:        req.Remark,
 		Kind:          req.Kind,
 		Protocol:      req.Protocol,
 		BaseURL:       req.BaseURL,
@@ -352,6 +354,7 @@ func fillAuthorized(o *op.Op, p *model.Provider) {
 
 type updateProviderReq struct {
 	Name       *string           `json:"name"`
+	Remark     *string           `json:"remark"`
 	BaseURL    *string           `json:"base_url"`
 	Protocol   *string           `json:"protocol"` // openai | anthropic | gemini
 	ModelMap   map[string]string `json:"model_map"`
@@ -483,6 +486,9 @@ func (h *ProviderHandler) Update(w http.ResponseWriter, r *http.Request) {
 		if req.Name != nil {
 			p.Name = *req.Name
 		}
+		if req.Remark != nil {
+			p.Remark = *req.Remark
+		}
 		if req.BaseURL != nil {
 			b := *req.BaseURL
 			if b == "" && p.Kind == "oauth" {
@@ -533,6 +539,9 @@ func (h *ProviderHandler) Update(w http.ResponseWriter, r *http.Request) {
 	changes := make([]string, 0, 6)
 	if req.Name != nil {
 		changes = append(changes, "name")
+	}
+	if req.Remark != nil {
+		changes = append(changes, "remark")
 	}
 	if req.BaseURL != nil {
 		changes = append(changes, "base_url")

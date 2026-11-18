@@ -17,6 +17,7 @@ const providers = {
 
   // ---- Shared form fields (wizard / edit modal) ----
   nameLabel: 'Display name *',
+  remarkLabel: 'Remark (optional)',
   protocolLabel: 'Protocol',
   priorityLabel: 'Priority (higher first)',
   proxyAccess: 'Access via platform proxy',
