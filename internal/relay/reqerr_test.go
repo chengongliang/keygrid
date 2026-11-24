@@ -116,6 +116,11 @@ func TestSanitizeErrMessage(t *testing.T) {
 			want: "rate limited (code=429)",
 		},
 		{
+			name: "Qoder 顶层错误",
+			body: `{"code":"103","message":"Duplicate request","request":"PROMPT ECHO"}`,
+			want: "Duplicate request (code=103)",
+		},
+		{
 			name: "只有 status 字段",
 			body: `{"error":{"status":"RESOURCE_EXHAUSTED"}}`,
 			want: "RESOURCE_EXHAUSTED",

@@ -6,8 +6,9 @@ KeyGrid 的部分代码与素材移植/改编自以下开源项目。按照其�
 
 - 仓库：https://github.com/decolua/9router
 - 使用范围：
-  - `internal/oauth/providers/`：kimi / openai / anthropic / iflow / qoder / trae / codebuddy 的 OAuth 适配器移植（各文件头有 port 来源标注）
+  - `internal/oauth/providers/`：kimi / openai / anthropic / iflow / qoder / qoder-cn / trae / codebuddy 的 OAuth 适配器移植（各文件头有 port 来源标注）
   - `internal/oauth/presets.go`：供应商预设与模型目录数据
+  - `internal/relay/qoder.go`：Qoder PAT 交换、COSY 签名、请求编码与 SSE 封装参考 9router Qoder provider 实现
   - `web/public/logos/`：供应商图标素材
 - 许可证全文：
 

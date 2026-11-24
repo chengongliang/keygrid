@@ -78,6 +78,7 @@ func sanitizeErrMessage(body, contentType string) string {
 		} `json:"error"`
 		Message string `json:"message"`
 		Type    string `json:"type"`
+		Code    any    `json:"code"`
 	}
 	if json.Unmarshal([]byte(body), &probe) == nil {
 		msg := anyString(probe.Error.Message)
@@ -93,7 +94,7 @@ func sanitizeErrMessage(body, contentType string) string {
 			if t := firstNonEmpty(probe.Error.Type, probe.Type); t != "" {
 				extras = append(extras, "type="+t)
 			}
-			if c := anyString(probe.Error.Code); c != "" {
+			if c := firstNonEmpty(anyString(probe.Error.Code), anyString(probe.Code)); c != "" {
 				extras = append(extras, "code="+c)
 			}
 			if len(extras) > 0 {

@@ -78,8 +78,14 @@ func (h *TestHandler) TestProvider(w http.ResponseWriter, r *http.Request) {
 
 	// 占位模型：model_map 第一个 key，否则 gpt-4o-mini
 	modelName := "gpt-4o-mini"
-	for k := range p.ModelMap {
+	if relay.IsQoderProvider(p) {
+		modelName = "auto"
+	}
+	for k, upstream := range p.ModelMap {
 		modelName = k
+		if relay.IsQoderProvider(p) && upstream != "" {
+			modelName = upstream
+		}
 		break
 	}
 
@@ -89,7 +95,7 @@ func (h *TestHandler) TestProvider(w http.ResponseWriter, r *http.Request) {
 		resp.JSON(w, http.StatusOK, map[string]any{"code": 0, "data": res})
 		return
 	}
-	status, latency, body := probeUpstream(r.Context(), client, p, secret, credExtra["chatgptAccountId"], modelName)
+	status, latency, body := probeUpstream(r.Context(), client, p, secret, credExtra, modelName)
 	res.Status = status
 	res.LatencyMs = latency
 	// 上游 401/403 → 凭据问题；404 → base_url 路径不对；200/400（参数错）→ 连通即可
@@ -109,7 +115,7 @@ func (h *TestHandler) TestProvider(w http.ResponseWriter, r *http.Request) {
 }
 
 // credentialSecretForTest 解密凭据取上游密钥（api_key 或 oauth access_token）及
-// token extra（codex 探测需要 extra.chatgptAccountId 拼 chatgpt-account-id 头）。
+// token extra（Codex 需要账号头，Qoder COSY 需要授权时的用户与机器身份）。
 // 注意：不触发 oauth 兜底刷新（test 是只读轻操作），过期 token 由上游 401 反映。
 func credentialSecretForTest(cred *model.Credential) (string, map[string]string, error) {
 	plain, err := crypto.Decrypt(cred.EncData)
@@ -131,8 +137,13 @@ func credentialSecretForTest(cred *model.Credential) (string, map[string]string,
 
 // probeUpstream 发最小探活请求：普通渠道打 /v1/chat/completions；
 // Codex 渠道打 base_url（Responses endpoint，store:false 最小 input）。
+// Qoder 渠道复用真实 COSY 转发路径。
 // client 由调用方按渠道代理开关构建（probeClient）。
-func probeUpstream(ctx context.Context, client *http.Client, p *model.Provider, secret, accountID, model string) (int, int64, string) {
+func probeUpstream(ctx context.Context, client *http.Client, p *model.Provider, secret string, extra map[string]string, model string) (int, int64, string) {
+	if relay.IsQoderProvider(p) {
+		probe := relay.QoderProbe(ctx, client, secret, extra, p, model, "ping", 1, false)
+		return probe.Status, probe.LatencyMS, probe.Error
+	}
 	var target string
 	var payload []byte
 	if relay.IsResponsesProvider(p) {
@@ -179,7 +190,7 @@ func probeUpstream(ctx context.Context, client *http.Client, p *model.Provider, 
 		// 9router codex transport.headers + chatgpt-account-id
 		req.Header.Set("originator", "codex_cli_rs")
 		req.Header.Set("User-Agent", "codex_cli_rs/0.136.0")
-		if accountID != "" {
+		if accountID := extra["chatgptAccountId"]; accountID != "" {
 			req.Header.Set("chatgpt-account-id", accountID)
 		}
 	}

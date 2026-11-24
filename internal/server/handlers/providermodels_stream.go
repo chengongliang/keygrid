@@ -105,7 +105,7 @@ func (h *TestHandler) TestModelStream(w http.ResponseWriter, r *http.Request) {
 	}
 	res.Prompt = prompt
 
-	secret, accountID, errMsg := h.probeSecret(p)
+	secret, credExtra, errMsg := h.probeSecret(p)
 	if errMsg != "" {
 		res.Error = errMsg
 		emit()
@@ -118,8 +118,13 @@ func (h *TestHandler) TestModelStream(w http.ResponseWriter, r *http.Request) {
 		emit()
 		return
 	}
+	if relay.IsQoderProvider(p) {
+		setQoderProbeResult(&res, relay.QoderProbe(r.Context(), client, secret, credExtra, p, res.Model, prompt, maxTokens, true))
+		emit()
+		return
+	}
 
-	upReq, err := buildUpstreamChatProbeReq(r.Context(), p, secret, accountID, res.Model, prompt, maxTokens, true)
+	upReq, err := buildUpstreamChatProbeReq(r.Context(), p, secret, credExtra["chatgptAccountId"], res.Model, prompt, maxTokens, true)
 	if err != nil {
 		res.Error = err.Error()
 		emit()

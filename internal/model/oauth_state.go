@@ -9,6 +9,7 @@ import (
 type OAuthState struct {
 	State       string            `gorm:"primaryKey" json:"state"`
 	UserID      int64             `gorm:"index;not null" json:"user_id"`
+	ProviderID  int64             `gorm:"index;not null;default:0" json:"provider_id"`
 	ProviderKey string            `gorm:"not null" json:"provider_key"`           // kimi | openai | anthropic
 	Temp        map[string]string `gorm:"serializer:json;type:jsonb" json:"temp"` // device_code / code_verifier / _deviceId / callback code
 	ExpiresAt   time.Time         `gorm:"not null" json:"expires_at"`

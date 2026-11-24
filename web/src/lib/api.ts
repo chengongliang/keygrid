@@ -257,6 +257,7 @@ export interface TestModelResult {
 export interface ProviderPreset {
   key: string
   kind: 'api_key' | 'oauth'
+  oauth_provider?: string
   protocol: string
   base_url: string
   api_key_url?: string

@@ -8,6 +8,9 @@ import type { Provider } from '@/lib/api'
 const ICON_ALIASES: Record<string, string> = {
   qianfan: 'baidu', // 百度千帆
   hunyuan: 'tencent', // 腾讯混元
+  'qoder-cn': 'qoder',
+  'qoder-pat': 'qoder',
+  'qoder-cn-pat': 'qoder',
 }
 
 // api_key 渠道按 base_url host 匹配预设平台（与后端 presets.go 的 base_url 对应；
@@ -65,6 +68,7 @@ export function markProviderIconMissing(platform: string | null | undefined): vo
  */
 export function resolveProviderPlatform(p: Pick<Provider, 'kind' | 'oauth_provider' | 'base_url' | 'protocol'>): string {
   if (p.kind === 'oauth') return normalize(p.oauth_provider) || normalize(p.protocol)
+  if (p.oauth_provider === 'qoder' || p.oauth_provider === 'qoder-cn') return p.oauth_provider
   const host = hostOf(p.base_url)
   if (host) {
     for (const [suffix, platform] of HOST_HINTS) {

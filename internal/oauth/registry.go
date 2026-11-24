@@ -61,6 +61,7 @@ var permanentMarkers = []string{
 	"refresh_token_expired",
 	"refresh_token_reused",
 	"refresh_token_invalidated",
+	"refresh_not_supported",
 	"invalid_grant",
 	// 9router isUnrecoverableRefreshError 另含 invalid_request
 	"invalid_request",

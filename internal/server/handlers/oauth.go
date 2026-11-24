@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -113,6 +114,7 @@ func (h *OAuthHandler) Start(w http.ResponseWriter, r *http.Request) {
 	if err := h.Op.CreateOAuthState(&model.OAuthState{
 		State:       state,
 		UserID:      userID,
+		ProviderID:  p.ID,
 		ProviderKey: p.OAuthProvider,
 		Temp:        temp,
 		ExpiresAt:   time.Now().Add(oauthStateTTL),
@@ -138,7 +140,7 @@ func (h *OAuthHandler) Poll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 找该 provider 对应的未过期 state（start 时创建）
-	st, err := h.Op.GetLatestOAuthState(userID, p.OAuthProvider)
+	st, err := h.Op.GetLatestOAuthStateForProvider(userID, p.ID)
 	if err != nil {
 		resp.BadRequest(w, "no pending oauth flow; call /oauth/start first")
 		return
@@ -173,6 +175,12 @@ func (h *OAuthHandler) Poll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.saveTokenSet(p, tok); err != nil {
+		var duplicate *duplicateQoderAccountError
+		if errors.As(err, &duplicate) {
+			_ = h.Op.DeleteOAuthState(st.State)
+			resp.Error(w, http.StatusConflict, http.StatusConflict, duplicate.Error())
+			return
+		}
 		resp.Internal(w, "save credential failed")
 		return
 	}
@@ -291,6 +299,12 @@ func (h *OAuthHandler) Complete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.saveTokenSet(p, tok); err != nil {
+		var duplicate *duplicateQoderAccountError
+		if errors.As(err, &duplicate) {
+			_ = h.Op.DeleteOAuthState(st.State)
+			resp.Error(w, http.StatusConflict, http.StatusConflict, duplicate.Error())
+			return
+		}
 		resp.Internal(w, "save credential failed")
 		return
 	}
@@ -304,6 +318,9 @@ func (h *OAuthHandler) Complete(w http.ResponseWriter, r *http.Request) {
 // 首次授权成功（此前无任何凭据）时把创建时禁用的渠道自动启用；
 // 重新授权不动 enabled（保留用户手动停用的意图）。
 func (h *OAuthHandler) saveTokenSet(p *model.Provider, tok *oauth.TokenSet) error {
+	if err := h.checkQoderDuplicateAccount(p, tok); err != nil {
+		return err
+	}
 	plain, err := json.Marshal(oauth.TokenSetData{
 		AccessToken:  tok.AccessToken,
 		RefreshToken: tok.RefreshToken,
@@ -339,6 +356,69 @@ func (h *OAuthHandler) saveTokenSet(p *model.Provider, tok *oauth.TokenSet) erro
 		}); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+type duplicateQoderAccountError struct{ ProviderName string }
+
+func (e *duplicateQoderAccountError) Error() string {
+	return fmt.Sprintf("this Qoder account is already authorized in channel %q; reuse that channel or authorize a different account", e.ProviderName)
+}
+
+type qoderAccountCredential struct {
+	ProviderID int64
+	Name       string
+	Status     string
+	Identity   string
+}
+
+func findDuplicateQoderAccount(identity string, providerID int64, credentials []qoderAccountCredential) *duplicateQoderAccountError {
+	if identity == "" {
+		return nil
+	}
+	for _, credential := range credentials {
+		if credential.ProviderID != providerID && credential.Status == "active" && credential.Identity == identity {
+			return &duplicateQoderAccountError{ProviderName: credential.Name}
+		}
+	}
+	return nil
+}
+
+func (h *OAuthHandler) checkQoderDuplicateAccount(p *model.Provider, tok *oauth.TokenSet) error {
+	if p == nil || tok == nil || p.Kind != "oauth" || (p.OAuthProvider != "qoder" && p.OAuthProvider != "qoder-cn") {
+		return nil
+	}
+	identity := tok.Extra["accountIdentity"]
+	if identity == "" {
+		return nil
+	}
+	credentials, err := h.Op.ListOAuthCredentialsForProvider(p.UserID, p.OAuthProvider)
+	if err != nil {
+		return err
+	}
+	identities := make([]qoderAccountCredential, 0, len(credentials))
+	for _, credential := range credentials {
+		if credential.ProviderID == p.ID || credential.Status != "active" {
+			continue
+		}
+		plain, err := crypto.Decrypt(credential.EncData)
+		if err != nil {
+			return fmt.Errorf("decrypt existing Qoder credential: %w", err)
+		}
+		var existing oauth.TokenSetData
+		if err := json.Unmarshal(plain, &existing); err != nil {
+			return fmt.Errorf("decode existing Qoder credential: %w", err)
+		}
+		identities = append(identities, qoderAccountCredential{
+			ProviderID: credential.ProviderID,
+			Name:       credential.ProviderName,
+			Status:     credential.Status,
+			Identity:   existing.Extra["accountIdentity"],
+		})
+	}
+	if duplicate := findDuplicateQoderAccount(identity, p.ID, identities); duplicate != nil {
+		return duplicate
 	}
 	return nil
 }

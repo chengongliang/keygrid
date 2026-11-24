@@ -1138,7 +1138,7 @@ func (h *Handler) upstreamCallCodex(
 		return upResp.StatusCode, UsageRecord{}, &UpstreamError{Status: upResp.StatusCode, Body: string(b), ContentType: upResp.Header.Get("Content-Type")}
 	}
 
-	// Codex 偶尔以 HTTP 200 返回流内过载/容量错误。必须在写客户端响应头前
+	// Codex 偶尔以 HTTP 200 返回流内错误。必须在写客户端响应头前
 	// 探测，否则 handler 已无法切换到同一用户的下一个渠道。
 	if status, err := peekCodexSSEError(upResp); err != nil {
 		return status, UsageRecord{}, err
@@ -1264,8 +1264,8 @@ func peekCodexSSEError(upResp *http.Response) (int, error) {
 			if codexSSEEventHasUserOutput(event) {
 				break
 			}
-			if message, matched := codexSSEPreOutputError(event); matched {
-				return http.StatusServiceUnavailable, fmt.Errorf("codex sse: %s", message)
+			if upstreamErr := codexSSEPreOutputError(event); upstreamErr != nil {
+				return upstreamErr.Status, upstreamErr
 			}
 		}
 		if readErr != nil {
@@ -1313,7 +1313,7 @@ func codexSSEEventHasUserOutput(event []byte) bool {
 
 // codexSSEPreOutputError 同时识别明确失败事件和已知暂态文本。部分上游把
 // 错误类型放在嵌套字段而不是 event/type 中，因此文本模式作为可靠兜底。
-func codexSSEPreOutputError(event []byte) (string, bool) {
+func codexSSEPreOutputError(event []byte) *UpstreamError {
 	typeName, ev, parsed := decodeCodexSSEEvent(event)
 	lower := strings.ToLower(string(event))
 	pattern := ""
@@ -1324,17 +1324,67 @@ func codexSSEPreOutputError(event []byte) (string, bool) {
 		}
 	}
 	if typeName != "response.failed" && typeName != "error" && pattern == "" {
-		return "", false
+		return nil
 	}
+	var fields map[string]any
 	if parsed {
-		if message := codexErrorMessage(ev); message != "codex upstream error" {
-			return message, true
+		fields, _ = ev["error"].(map[string]any)
+		if fields == nil {
+			if response, ok := ev["response"].(map[string]any); ok {
+				fields, _ = response["error"].(map[string]any)
+			}
 		}
 	}
-	if pattern != "" {
-		return pattern, true
+	if fields == nil {
+		fields = map[string]any{}
+		// 顶层 type 是 SSE 事件名，不能冒充上游错误类型。
+		for _, key := range []string{"message", "code", "param"} {
+			if value, ok := ev[key]; ok {
+				fields[key] = value
+			}
+		}
 	}
-	return "codex upstream error", true
+	if str(fields["message"]) == "" {
+		message := codexErrorMessage(ev)
+		if message == "codex upstream error" && pattern != "" {
+			message = pattern
+		}
+		fields["message"] = message
+	}
+	body, _ := json.Marshal(map[string]any{"error": fields})
+	return &UpstreamError{Status: codexSSEErrorStatus(fields), Body: string(body), ContentType: "application/json"}
+}
+
+// codexSSEErrorStatus 流内没有 HTTP 错误状态，优先按上游 code/type 分类。
+func codexSSEErrorStatus(fields map[string]any) int {
+	for _, key := range []string{"code", "type"} {
+		switch strings.ToLower(str(fields[key])) {
+		case "context_length_exceeded", "invalid_request_error", "invalid_prompt", "invalid_argument":
+			return http.StatusBadRequest
+		case "invalid_api_key", "authentication_error", "unauthorized":
+			return http.StatusUnauthorized
+		case "permission_denied", "permission_error", "access_denied":
+			return http.StatusForbidden
+		case "model_not_found", "not_found_error":
+			return http.StatusNotFound
+		case "rate_limit_exceeded", "rate_limit_error", "insufficient_quota":
+			return http.StatusTooManyRequests
+		case "server_error", "internal_server_error":
+			return http.StatusInternalServerError
+		case "server_is_overloaded", "service_unavailable_error", "model_at_capacity", "overloaded_error":
+			return http.StatusServiceUnavailable
+		}
+	}
+	message := strings.ToLower(str(fields["message"]))
+	if strings.Contains(message, "exceeds the context window") || strings.Contains(message, "maximum context length") {
+		return http.StatusBadRequest
+	}
+	for _, pattern := range codexSSETransientPatterns {
+		if strings.Contains(message, pattern) {
+			return http.StatusServiceUnavailable
+		}
+	}
+	return http.StatusBadGateway
 }
 
 func decodeCodexSSEEvent(event []byte) (string, map[string]any, bool) {

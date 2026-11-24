@@ -14,7 +14,7 @@ func TestOpenAIPresetNeedsProxy(t *testing.T) {
 }
 
 func TestOtherPresetsNoDefaultProxy(t *testing.T) {
-	for _, key := range []string{"kimi", "iflow", "qoder", "glm", "deepseek", "siliconflow"} {
+	for _, key := range []string{"kimi", "iflow", "qoder", "qoder-cn", "qoder-pat", "qoder-cn-pat", "glm", "deepseek", "siliconflow"} {
 		if p, ok := LookupPreset(key); ok && p.NeedsProxy {
 			t.Errorf("preset %q must not default to proxy", key)
 		}

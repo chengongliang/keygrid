@@ -21,7 +21,8 @@ Hard isolation — your requests are only ever routed to your own providers. Cre
 ## ✨ Features
 
 - 🔑 **API-key providers**: any OpenAI-compatible base_url (DeepSeek, Kimi openapi, third-party relay stations…), just paste your key
-- 🌐 **OAuth subscription providers**: Kimi (device_code), OpenAI/Codex (pkce), Anthropic/Claude, iFlow, Qoder, Trae, CodeBuddy — authorize inside the platform with automatic token refresh (5 minutes ahead of expiry)
+- 🌐 **OAuth subscription providers**: Kimi (device_code), OpenAI/Codex (pkce), Anthropic/Claude, iFlow, Qoder/Qoder CN, Trae, CodeBuddy; Qoder device tokens require reauthorization after expiry
+- 🔐 **Qoder PAT**: both Qoder regions support PAT presets; PATs are encrypted at rest, exchanged for short-lived job tokens, and sent with COSY signatures and account-specific model configuration
 - 📋 **Provider presets**: GLM, DeepSeek, SiliconFlow, Volcengine Ark, Qianfan, Hunyuan, Xiaomi MiMo, MiniMax and more out-of-the-box templates (auto-fills base_url + model catalog); when adding a provider you can fetch the upstream model list and tick models directly
 - 🛡 **Egress proxy**: configured once by admins in System Settings (http/https/socks5); users simply tick "use platform proxy" per provider — OpenAI and other proxy-required sites come pre-ticked; effective across relay, OAuth authorize/refresh, connection tests, and model fetching
 - 🔀 **Smart routing**: model_map mapping, priority, multi-provider failover, per-channel circuit breaker opt-in (off by default; when enabled, 5 channel-level failures within 30s trip it for 30s)
@@ -60,8 +61,8 @@ Open `http://127.0.0.1:8090` → register → add providers → grab your key.
 
 Open the gateway URL (e.g. `http://gw.company.com`) in your browser and register / sign in (if your company has OIDC SSO configured, just click "SSO Login"), then go to **My Providers**:
 
-- **API-key providers**: Add provider → pick a preset (GLM/DeepSeek/SiliconFlow… auto-fills base_url and models) or custom base_url → paste your API key → save → run "Test connection" until it's green; you can also fetch the upstream model list and tick models
-- **OAuth providers** (Kimi/Codex/Claude/iFlow/Qoder/Trae/CodeBuddy subscriptions): Add provider → "Authorize" → complete authorization via redirect or user_code → status turns active (tokens are auto-renewed by the platform, zero maintenance)
+- **API-key providers**: Add provider → pick a preset (GLM/DeepSeek/SiliconFlow… auto-fills base_url and models) or custom base_url → paste your API key → save; for Qoder, pick the matching regional PAT preset and the gateway exchanges it for a short-lived job token during relay
+- **OAuth providers** (Kimi/Codex/Claude/iFlow/Qoder/Qoder CN/Trae/CodeBuddy subscriptions): Add provider → "Authorize" → complete authorization via redirect or user_code → status turns active; Qoder device tokens require reauthorization after expiry
   - **OpenAI Codex**: requires a ChatGPT Plus/Pro subscription. After login the browser redirects to `localhost:1455` (the page won't load — that's expected). Copy the full URL from the address bar and paste it back into the platform to finish authorization. The upstream speaks the Responses protocol; the gateway converts chat/completions ↔ responses both ways, so just use `/v1` as usual. Picking the preset auto-fills the upstream URL (`https://chatgpt.com/backend-api/codex/responses` — it must be the full Responses endpoint); use a self-hosted/mirror endpoint by editing "Upstream URL" when editing the provider.
 - **Proxy-required sites** (e.g. OpenAI): tick "Access via platform proxy" when adding/editing the provider (the OpenAI preset comes pre-ticked); the proxy address is configured centrally by admins in System Settings — invisible and read-only for users. The option is hidden when no proxy is configured.
 

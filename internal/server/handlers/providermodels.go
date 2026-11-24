@@ -93,7 +93,7 @@ func (h *TestHandler) FetchUpstreamModels(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	secret, _, errMsg := h.probeSecret(p)
+	secret, credExtra, errMsg := h.probeSecret(p)
 	if errMsg != "" {
 		res.Error = errMsg
 		emit()
@@ -103,6 +103,17 @@ func (h *TestHandler) FetchUpstreamModels(w http.ResponseWriter, r *http.Request
 	client, err := probeClient(h.Op, p.UseProxy, 30*time.Second)
 	if err != nil {
 		res.Error = err.Error()
+		emit()
+		return
+	}
+	if relay.IsQoderProvider(p) {
+		res.Models, err = relay.QoderModels(r.Context(), client, secret, credExtra, p)
+		res.Status = http.StatusOK
+		if err != nil {
+			res.Error = err.Error()
+		} else {
+			res.OK = true
+		}
 		emit()
 		return
 	}
@@ -124,10 +135,11 @@ func (h *TestHandler) FetchUpstreamModels(w http.ResponseWriter, r *http.Request
 // use_proxy：新增场景前端向导的勾选状态（渠道未落库，代理开关随请求传入）；
 // 编辑场景以落库渠道的 use_proxy 为准（该字段传入无效）。
 type probeModelsReq struct {
-	BaseURL    string `json:"base_url"`
-	APIKey     string `json:"api_key"`
-	ProviderID int64  `json:"provider_id"`
-	UseProxy   bool   `json:"use_proxy"`
+	BaseURL       string `json:"base_url"`
+	APIKey        string `json:"api_key"`
+	ProviderID    int64  `json:"provider_id"`
+	OAuthProvider string `json:"oauth_provider"`
+	UseProxy      bool   `json:"use_proxy"`
 }
 
 // ProbeModels POST /api/providers/probe_models —— 配置时探测上游模型（不要求渠道已存在）。
@@ -139,6 +151,11 @@ func (h *TestHandler) ProbeModels(w http.ResponseWriter, r *http.Request) {
 	var req probeModelsReq
 	if err := resp.Decode(r, &req); err != nil {
 		res.Error = "invalid json body"
+		emit()
+		return
+	}
+	if req.ProviderID == 0 && req.OAuthProvider != "" && req.OAuthProvider != "qoder" && req.OAuthProvider != "qoder-cn" {
+		res.Error = "unsupported special provider"
 		emit()
 		return
 	}
@@ -185,19 +202,21 @@ func (h *TestHandler) ProbeModels(w http.ResponseWriter, r *http.Request) {
 
 	// 凭据：显式 api_key 优先，否则用存储凭据
 	secret := strings.TrimSpace(req.APIKey)
+	var credExtra map[string]string
 	if secret == "" {
 		if p == nil {
 			res.Error = "api_key or provider_id required"
 			emit()
 			return
 		}
-		s, _, errMsg := h.probeCredential(p)
+		s, extra, errMsg := h.probeCredential(p)
 		if errMsg != "" {
 			res.Error = errMsg
 			emit()
 			return
 		}
 		secret = s
+		credExtra = extra
 	}
 
 	// 代理开关：已有渠道用落库值；新增场景用请求体携带的向导勾选状态
@@ -208,6 +227,21 @@ func (h *TestHandler) ProbeModels(w http.ResponseWriter, r *http.Request) {
 	client, err := probeClient(h.Op, useProxy, 30*time.Second)
 	if err != nil {
 		res.Error = err.Error()
+		emit()
+		return
+	}
+	probeProvider := p
+	if probeProvider == nil && req.OAuthProvider != "" {
+		probeProvider = &model.Provider{Kind: "api_key", OAuthProvider: req.OAuthProvider}
+	}
+	if relay.IsQoderProvider(probeProvider) {
+		res.Models, err = relay.QoderModels(r.Context(), client, secret, credExtra, probeProvider)
+		res.Status = http.StatusOK
+		if err != nil {
+			res.Error = err.Error()
+		} else {
+			res.OK = true
+		}
 		emit()
 		return
 	}
@@ -268,6 +302,23 @@ type testModelResult struct {
 	Channel          string `json:"channel_name"`
 }
 
+func setQoderProbeResult(res *testModelResult, probe relay.QoderProbeResult) {
+	res.Status = probe.Status
+	res.LatencyMs = probe.LatencyMS
+	res.Content = probe.Content
+	res.ReasoningContent = probe.Reasoning
+	res.FinishReason = probe.FinishReason
+	res.PromptTokens = probe.PromptTokens
+	res.CompletionTokens = probe.CompletionTokens
+	if probe.Error != "" {
+		res.Error = probe.Error
+	} else if probe.Status >= http.StatusBadRequest {
+		res.Error = "model unavailable (HTTP " + itoa(probe.Status) + ")"
+	} else {
+		res.OK = true
+	}
+}
+
 // TestModel 对指定模型发一次 chat completion。
 // 轻量测活：max_tokens=1 只验证「模型存在可用」；模拟真实请求：完整读取响应，
 // 返回提示词/输出内容/耗时/首字延迟/token 用量（流式时聚合 SSE delta）。
@@ -317,7 +368,7 @@ func (h *TestHandler) TestModel(w http.ResponseWriter, r *http.Request) {
 	}
 	res.Prompt = prompt
 
-	secret, accountID, errMsg := h.probeSecret(p)
+	secret, credExtra, errMsg := h.probeSecret(p)
 	if errMsg != "" {
 		res.Error = errMsg
 		emit()
@@ -330,7 +381,12 @@ func (h *TestHandler) TestModel(w http.ResponseWriter, r *http.Request) {
 		emit()
 		return
 	}
-	pr := probeUpstreamChat(r.Context(), client, p, secret, accountID, res.Model, prompt, maxTokens, req.Stream)
+	if relay.IsQoderProvider(p) {
+		setQoderProbeResult(&res, relay.QoderProbe(r.Context(), client, secret, credExtra, p, res.Model, prompt, maxTokens, req.Stream))
+		emit()
+		return
+	}
+	pr := probeUpstreamChat(r.Context(), client, p, secret, credExtra["chatgptAccountId"], res.Model, prompt, maxTokens, req.Stream)
 	res.Status = pr.Status
 	res.LatencyMs = pr.LatencyMs
 	if req.Stream {
@@ -579,27 +635,27 @@ func readStreamChat(body io.Reader, start time.Time) chatProbe {
 
 // probeSecret 已存渠道探测公共前置：SSRF 校验 + 凭据检查 + 解密上游密钥。
 // 返回 errMsg 非空表示失败（已含可读原因），由调用方直接作为 res.Error 透出。
-func (h *TestHandler) probeSecret(p *model.Provider) (string, string, string) {
+func (h *TestHandler) probeSecret(p *model.Provider) (string, map[string]string, string) {
 	if err := ssrf.CheckBaseURL(p.BaseURL); err != nil {
-		return "", "", err.Error()
+		return "", nil, err.Error()
 	}
 	return h.probeCredential(p)
 }
 
 // probeCredential 凭据检查 + 解密（不含 SSRF，base_url 可能被探测请求覆盖）。
-func (h *TestHandler) probeCredential(p *model.Provider) (string, string, string) {
+func (h *TestHandler) probeCredential(p *model.Provider) (string, map[string]string, string) {
 	cred, err := h.Op.GetCredentialByProviderID(p.ID)
 	if err != nil {
-		return "", "", "credential not configured (oauth not authorized yet?)"
+		return "", nil, "credential not configured (oauth not authorized yet?)"
 	}
 	if cred.Status == "revoked" {
-		return "", "", "credential revoked, re-auth required"
+		return "", nil, "credential revoked, re-auth required"
 	}
 	secret, extra, err := credentialSecretForTest(cred)
 	if err != nil {
-		return "", "", err.Error()
+		return "", nil, err.Error()
 	}
-	return secret, extra["chatgptAccountId"], ""
+	return secret, extra, ""
 }
 
 // truncateBody 错误摘要截断（上游响应体可能很大，不整体塞进错误信息）。

@@ -206,6 +206,22 @@ func (o *Op) GetCredentialByProviderID(providerID int64) (*model.Credential, err
 	return &c, nil
 }
 
+type OAuthCredential struct {
+	model.Credential
+	ProviderName string `gorm:"column:provider_name"`
+}
+
+// ListOAuthCredentialsForProvider 返回当前用户某 OAuth provider 的凭据，供账号去重使用。
+func (o *Op) ListOAuthCredentialsForProvider(userID int64, providerKey string) ([]OAuthCredential, error) {
+	var cs []OAuthCredential
+	err := o.DB.Table("credentials").
+		Select("credentials.*, providers.name AS provider_name").
+		Joins("JOIN providers ON providers.id = credentials.provider_id").
+		Where("providers.user_id = ? AND providers.kind = ? AND providers.oauth_provider = ?", userID, "oauth", providerKey).
+		Find(&cs).Error
+	return cs, err
+}
+
 // CredentialStatusByProviderIDs 批量取凭据状态（provider 列表"待授权"标记用）。
 // 返回 provider_id → status；无凭据的 id 不在 map 中。
 func (o *Op) CredentialStatusByProviderIDs(providerIDs []int64) (map[int64]string, error) {
@@ -285,12 +301,11 @@ func (o *Op) GetOAuthState(state string) (*model.OAuthState, error) {
 	return &s, nil
 }
 
-// GetLatestOAuthState 该用户某 oauth provider key 最近一次未消费的授权 flow。
-// Poll 接口用（state 表通过 provider_key 关联 provider.oauth_provider）。
-func (o *Op) GetLatestOAuthState(userID int64, providerKey string) (*model.OAuthState, error) {
+// GetLatestOAuthStateForProvider 取该用户、该渠道最近一次未消费的授权 flow。
+func (o *Op) GetLatestOAuthStateForProvider(userID, providerID int64) (*model.OAuthState, error) {
 	var s model.OAuthState
 	err := o.DB.
-		Where("user_id = ? AND provider_key = ?", userID, providerKey).
+		Where("user_id = ? AND provider_id = ?", userID, providerID).
 		Where("expires_at > ?", time.Now()).
 		Order("created_at DESC").
 		First(&s).Error

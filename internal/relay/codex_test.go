@@ -624,9 +624,12 @@ func TestPeekCodexSSEOutputTextContainingErrorPatternWins(t *testing.T) {
 
 func TestUpstreamCallCodexSSEPreOutputError(t *testing.T) {
 	tests := []struct {
-		name string
-		sse  string
-		want string
+		name       string
+		sse        string
+		want       string
+		wantStatus int
+		wantCode   string
+		wantType   string
 	}{
 		{
 			name: "reasoning 后 response.failed capacity",
@@ -640,18 +643,51 @@ func TestUpstreamCallCodexSSEPreOutputError(t *testing.T) {
 				`data: {"type":"response.failed","response":{"error":{"message":"Selected model is at capacity. Please try a different model."}}}`,
 				``,
 			}, "\n"),
-			want: "Selected model is at capacity",
+			want:       "Selected model is at capacity",
+			wantStatus: http.StatusServiceUnavailable,
 		},
 		{
 			name: "error 事件 overloaded",
 			sse: "event: error\n" +
 				`data: {"type":"error","error":{"message":"server_is_overloaded"}}` + "\n\n",
-			want: "server_is_overloaded",
+			want:       "server_is_overloaded",
+			wantStatus: http.StatusServiceUnavailable,
 		},
 		{
-			name: "普通事件中的暂态文本",
-			sse:  `data: {"type":"response.in_progress","detail":"service_unavailable_error"}` + "\n\n",
-			want: "service_unavailable_error",
+			name:       "普通事件中的暂态文本",
+			sse:        `data: {"type":"response.in_progress","detail":"service_unavailable_error"}` + "\n\n",
+			want:       "service_unavailable_error",
+			wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			name:       "嵌套上下文超限",
+			sse:        `data: {"type":"response.failed","response":{"input":"PRIVATE PROMPT","error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again.","code":"context_length_exceeded","type":"invalid_request_error","param":"input"}}}` + "\n\n",
+			want:       "Your input exceeds the context window of this model. Please adjust your input and try again.",
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "context_length_exceeded",
+			wantType:   "invalid_request_error",
+		},
+		{
+			name:       "只有上下文超限消息",
+			sse:        `data: {"type":"error","message":"Your input exceeds the context window of this model."}` + "\n\n",
+			want:       "Your input exceeds the context window of this model.",
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "限流保留错误码",
+			sse:        `data: {"type":"error","error":{"message":"Too many requests","code":"rate_limit_exceeded","type":"invalid_request_error"}}` + "\n\n",
+			want:       "Too many requests",
+			wantStatus: http.StatusTooManyRequests,
+			wantCode:   "rate_limit_exceeded",
+			wantType:   "invalid_request_error",
+		},
+		{
+			name:       "未知错误保留上游详情",
+			sse:        `data: {"type":"error","error":{"message":"Specific upstream failure","code":"vendor_failure","type":"vendor_error"}}` + "\n\n",
+			want:       "Specific upstream failure",
+			wantStatus: http.StatusBadGateway,
+			wantCode:   "vendor_failure",
+			wantType:   "vendor_error",
 		},
 	}
 
@@ -664,16 +700,75 @@ func TestUpstreamCallCodexSSEPreOutputError(t *testing.T) {
 			defer up.Close()
 
 			h := NewHandler(nil)
-			w := httptest.NewRecorder()
 			body, _ := BuildCodexRequest([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`), "gpt-5.4")
-			status, _, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, up.URL, "tok", "", body, true, protoOpenAI, w, nil, "")
-			if status != http.StatusServiceUnavailable || err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("status=%d err=%v, want 503 containing %q", status, err, tt.want)
-			}
-			if w.Body.Len() != 0 {
-				t.Fatalf("前置错误不可写客户端，got %q", w.Body.String())
+			for _, stream := range []bool{false, true} {
+				for _, entry := range []string{protoOpenAI, protoResponses, protoAnthropic} {
+					w := httptest.NewRecorder()
+					status, _, err := h.upstreamCallCodex(t.Context(), h.HTTPClient, up.URL, "tok", "", body, stream, entry, w, nil, "")
+					var ue *UpstreamError
+					if status != tt.wantStatus || !errors.As(err, &ue) {
+						t.Fatalf("stream=%v entry=%s: status=%d err=%v, want %d + UpstreamError", stream, entry, status, err, tt.wantStatus)
+					}
+					if w.Body.Len() != 0 {
+						t.Fatalf("前置错误不可写客户端，got %q", w.Body.String())
+					}
+					if strings.Contains(err.Error(), tt.want) {
+						t.Fatalf("Error() 不得携带上游消息: %v", err)
+					}
+					if got := channelFailure(err, status); got != (status == 429 || status >= 500) {
+						t.Fatalf("错误熔断分类: status=%d channelFailure=%v", status, got)
+					}
+					if !gatewayUpstreamError(w, entry, ue) || w.Code != tt.wantStatus {
+						t.Fatalf("上游错误返回失败: status=%d body=%s", w.Code, w.Body.String())
+					}
+					var payload struct {
+						Error struct {
+							Message string `json:"message"`
+							Code    string `json:"code"`
+							Type    string `json:"type"`
+							Param   string `json:"param"`
+						} `json:"error"`
+					}
+					if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+						t.Fatal(err)
+					}
+					if !strings.Contains(payload.Error.Message, tt.want) || payload.Error.Code != tt.wantCode || payload.Error.Type != tt.wantType {
+						t.Fatalf("上游错误字段丢失: %s", w.Body.String())
+					}
+					if tt.wantCode == "context_length_exceeded" && payload.Error.Param != "input" {
+						t.Fatalf("上游 param 丢失: %s", w.Body.String())
+					}
+					if strings.Contains(w.Body.String(), "PRIVATE PROMPT") || strings.Contains(upstreamFailureDetail(err), "PRIVATE PROMPT") {
+						t.Fatal("失败事件中的请求正文不可作为错误返回或落库")
+					}
+				}
 			}
 		})
+	}
+}
+
+func TestCodexSSEErrorStatus(t *testing.T) {
+	cases := []struct {
+		code, typ, message string
+		want               int
+	}{
+		{code: "context_length_exceeded", want: 400},
+		{typ: "invalid_request_error", want: 400},
+		{code: "invalid_api_key", want: 401},
+		{typ: "permission_error", want: 403},
+		{code: "model_not_found", typ: "invalid_request_error", want: 404},
+		{typ: "rate_limit_error", want: 429},
+		{code: "insufficient_quota", want: 429},
+		{code: "server_error", want: 500},
+		{typ: "overloaded_error", want: 503},
+		{message: "This model's maximum context length is 100 tokens.", want: 400},
+		{message: "Unknown failure", want: 502},
+	}
+	for _, tt := range cases {
+		fields := map[string]any{"code": tt.code, "type": tt.typ, "message": tt.message}
+		if got := codexSSEErrorStatus(fields); got != tt.want {
+			t.Errorf("%v: status=%d, want %d", fields, got, tt.want)
+		}
 	}
 }
 

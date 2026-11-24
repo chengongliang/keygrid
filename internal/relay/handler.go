@@ -228,6 +228,7 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 	var lastErrMsg string
 	// 上游正文摘要仅回传客户端，不写日志（Error() 本身已不含正文，见 UpstreamError）
 	var lastErrDetail string
+	var lastUpstreamErr *UpstreamError
 	// 一次请求内同一渠道最多计一次熔断失败：failover 会把同一个请求打到多条渠道，
 	// 去重避免重复计数把单个坏请求放大成多条渠道的熔断
 	failedChannels := map[int64]bool{}
@@ -360,6 +361,7 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 		var status int
 		var usage UsageRecord
 		var callErr error
+		lastUpstreamErr = nil
 		// 仅经过 pivot 的 Responses 请求需要还原工具；每次重试使用独立状态。
 		responseWriter := w
 		if entry == protoResponses && proto != protoResponses {
@@ -378,8 +380,13 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 			status, usage, callErr = h.upstreamCallAnthropic(r.Context(), client, target, cand.provider,
 				apiKey, upstreamBody, req.Stream, entry, responseWriter, ua)
 		default:
-			status, usage, callErr = h.upstreamCall(r.Context(), client, target, apiKey,
-				upstreamBody, req.Stream, entry, responseWriter, ua)
+			if IsQoderProvider(cand.provider) {
+				status, usage, callErr = h.upstreamCallQoder(r.Context(), client, apiKey, tokenExtra,
+					cand.provider, cand.upModel, upstreamBody, req.Stream, entry, responseWriter, ua)
+			} else {
+				status, usage, callErr = h.upstreamCall(r.Context(), client, target, apiKey,
+					upstreamBody, req.Stream, entry, responseWriter, ua)
+			}
 		}
 
 		// 记账（含失败请求：tokens=0，status/latency 保留）
@@ -410,9 +417,8 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 			lastStatus = status
 			lastErrMsg = "upstream " + cand.provider.Name + " failed: " + callErr.Error()
 			lastErrDetail = ""
-			var ue *UpstreamError
-			if errors.As(callErr, &ue) {
-				lastErrDetail = ue.Detail()
+			if errors.As(callErr, &lastUpstreamErr) {
+				lastErrDetail = lastUpstreamErr.Detail()
 			} else if d, ok := callErr.(interface{ Detail() string }); ok {
 				// 其他自带响应摘要的错误（如 codexNonSSEError）：摘要只回客户端
 				lastErrDetail = d.Detail()
@@ -456,6 +462,9 @@ func (h *Handler) relayCore(w http.ResponseWriter, r *http.Request, entry string
 		lastStatus = http.StatusServiceUnavailable
 	}
 	log.Printf("[relay] all channels failed for model %s user=%d: %s", req.Model, userID, lastErrMsg)
+	if lastUpstreamErr != nil && gatewayUpstreamError(w, entry, lastUpstreamErr) {
+		return
+	}
 	clientMsg := lastErrMsg
 	if lastErrDetail != "" {
 		clientMsg += ": " + lastErrDetail

@@ -32,7 +32,7 @@ type WizardState = {
 
 const emptyWizard: WizardState = {
   step: 1, kind: 'api_key', presetKey: '', name: '', remark: '', nameTouched: false, protocol: 'openai', base_url: '',
-  oauth_provider: 'kimi', api_key: '', model_map_text: '', priority: 0, use_proxy: false, breaker_check: false,
+  oauth_provider: '', api_key: '', model_map_text: '', priority: 0, use_proxy: false, breaker_check: false,
   ua_mode: '', user_agent: '',
 }
 
@@ -268,7 +268,7 @@ export default function Providers() {
       // 展示名未手动编辑过则跟随预设（手动改过则尊重用户输入）
       name: wiz!.nameTouched ? wiz!.name : p.key,
       nameTouched: wiz!.nameTouched,
-      oauth_provider: p.kind === 'oauth' ? p.key : wiz!.oauth_provider,
+      oauth_provider: p.oauth_provider ?? (p.kind === 'oauth' ? p.key : ''),
       // 需代理站点（如 OpenAI）默认勾选走平台代理；其他预设恢复未勾选
       use_proxy: p.needs_proxy ?? false,
       // 切换预设即切换平台：旧平台的模型映射对新平台无意义，重置为该预设的内置模型
@@ -418,6 +418,7 @@ export default function Providers() {
     if (wiz.kind === 'api_key') {
       body.base_url = wiz.base_url
       body.api_key = wiz.api_key
+      if (wiz.oauth_provider) body.oauth_provider = wiz.oauth_provider
     } else {
       body.oauth_provider = wiz.oauth_provider
       if (wiz.base_url) body.base_url = wiz.base_url
@@ -656,7 +657,7 @@ export default function Providers() {
 
   // 配置时探测上游模型列表（probe_models）。
   // 新增场景传 base_url+api_key（渠道未落库）；编辑场景传 provider_id（用存储凭据）。
-  const probeModels = async (payload: { base_url?: string; api_key?: string; provider_id?: number; use_proxy?: boolean }) => {
+  const probeModels = async (payload: { base_url?: string; api_key?: string; provider_id?: number; oauth_provider?: string; use_proxy?: boolean }) => {
     const gen = ++probeGenRef.current
     setErr(''); setProbeRes(null)
     setProbing(true)
@@ -811,11 +812,11 @@ export default function Providers() {
           {wiz.step === 1 && (
             <div className="grid grid-cols-2 gap-3">
               {/* 切换渠道类型：上个类型遗留的展示名/模型映射/探测结果一并清掉 */}
-              <button className="card text-left hover:border-violet-700" onClick={() => { resetProbe(); setWiz({ ...wiz, kind: 'api_key', step: 2, ...(wiz.kind !== 'api_key' ? { name: '', nameTouched: false, model_map_text: '', base_url: '' } : {}) }) }}>
+              <button className="card text-left hover:border-violet-700" onClick={() => { resetProbe(); setWiz({ ...wiz, kind: 'api_key', oauth_provider: wiz.kind !== 'api_key' ? '' : wiz.oauth_provider, step: 2, ...(wiz.kind !== 'api_key' ? { name: '', nameTouched: false, model_map_text: '', base_url: '' } : {}) }) }}>
                 <div className="font-medium">API Key</div>
                 <div className="mt-1 text-xs text-muted">{t('providers.wizard.typeApiKeyDesc')}</div>
               </button>
-              <button className="card text-left hover:border-violet-700" onClick={() => { resetProbe(); setWiz({ ...wiz, kind: 'oauth', step: 2, ...(wiz.kind !== 'oauth' ? { name: '', nameTouched: false, model_map_text: '', base_url: '' } : {}) }) }}>
+              <button className="card text-left hover:border-violet-700" onClick={() => { resetProbe(); setWiz({ ...wiz, kind: 'oauth', oauth_provider: wiz.kind !== 'oauth' ? (oauthKeys[0] ?? 'kimi') : wiz.oauth_provider, step: 2, ...(wiz.kind !== 'oauth' ? { name: '', nameTouched: false, model_map_text: '', base_url: '' } : {}) }) }}>
                 <div className="font-medium">{t('providers.wizard.typeOauth')}</div>
                 <div className="mt-1 text-xs text-muted">{t('providers.wizard.typeOauthDesc')}</div>
               </button>
@@ -876,6 +877,7 @@ export default function Providers() {
               </div>
               {(() => { const p = findPreset(wiz.presetKey) || findPreset(wiz.oauth_provider); return p ? (
                 <p className="text-xs text-muted">
+                  {wiz.kind === 'api_key' && p.auth_mode && <>🔐 {p.auth_mode} · </>}
                   {p.api_key_url && <>🔑 <a className="underline" href={p.api_key_url} target="_blank" rel="noreferrer">{t('providers.wizard.getApiKey')}</a> · </>}
                   {p.models.length > 0 && <>📦 {t('providers.wizard.builtinModels', { models: p.models.slice(0, 5).join(' / ') })}{p.models.length > 5 ? t('providers.wizard.modelsMore', { count: p.models.length }) : ''}</>}
                 </p>
@@ -929,7 +931,7 @@ export default function Providers() {
               {wiz.kind === 'api_key' && (
                 <div>
                   <label className="label">{t('providers.wizard.apiKeyLabel')}</label>
-                  <input className="input" type="password" value={wiz.api_key} onChange={(e) => setWiz({ ...wiz, api_key: e.target.value })} placeholder="sk-…" />
+                  <input className="input" type="password" value={wiz.api_key} onChange={(e) => setWiz({ ...wiz, api_key: e.target.value })} placeholder={wiz.oauth_provider === 'qoder' || wiz.oauth_provider === 'qoder-cn' ? 'pt-…' : 'sk-…'} />
                 </div>
               )}
               <ModelPicker
@@ -937,7 +939,7 @@ export default function Providers() {
                 fetchHint={t('providers.wizard.fetchHint')}
                 fetching={probing}
                 result={probeRes}
-                onFetch={() => probeModels({ base_url: wiz.base_url, api_key: wiz.api_key, use_proxy: wiz.use_proxy })}
+                onFetch={() => probeModels({ base_url: wiz.base_url, api_key: wiz.api_key, oauth_provider: wiz.oauth_provider, use_proxy: wiz.use_proxy })}
                 selected={parseModelMap(wiz.model_map_text) ?? {}}
                 onToggle={(m) => setWiz({ ...wiz, model_map_text: withMap(wiz.model_map_text, (cur) => serializeMap(toggleKey(cur, m))) })}
                 onSelectAll={(names) => setWiz({ ...wiz, model_map_text: withMap(wiz.model_map_text, (cur) => serializeMap({ ...cur, ...Object.fromEntries(names.map((n) => [n, n])) })) })}
@@ -1304,7 +1306,7 @@ export default function Providers() {
             {editForm.kind === 'api_key' && (
               <div>
                 <label className="label">{t('providers.edit.apiKeyLabel')}</label>
-                <input className="input" type="password" value={editForm.api_key} onChange={(e) => setEditForm({ ...editForm, api_key: e.target.value })} placeholder="sk-…" />
+                <input className="input" type="password" value={editForm.api_key} onChange={(e) => setEditForm({ ...editForm, api_key: e.target.value })} placeholder={editForm.oauth_provider === 'qoder' || editForm.oauth_provider === 'qoder-cn' ? 'pt-…' : 'sk-…'} />
               </div>
             )}
             <label className="flex items-start gap-2 text-sm">
@@ -1334,7 +1336,7 @@ export default function Providers() {
               fetchHint=""
               fetching={probing}
               result={probeRes}
-              onFetch={() => probeModels(editForm.kind === 'api_key' ? { provider_id: editForm.id, base_url: editForm.base_url, use_proxy: editForm.use_proxy } : { provider_id: editForm.id, use_proxy: editForm.use_proxy })}
+              onFetch={() => probeModels(editForm.kind === 'api_key' ? { provider_id: editForm.id, base_url: editForm.base_url, oauth_provider: editForm.oauth_provider, use_proxy: editForm.use_proxy } : { provider_id: editForm.id, use_proxy: editForm.use_proxy })}
               selected={parseModelMap(editForm.model_map_text) ?? {}}
               onToggle={(m) => setEditForm({ ...editForm, model_map_text: withMap(editForm.model_map_text, (cur) => serializeMap(toggleKey(cur, m))) })}
               onSelectAll={(names) => setEditForm({ ...editForm, model_map_text: withMap(editForm.model_map_text, (cur) => serializeMap({ ...cur, ...Object.fromEntries(names.map((n) => [n, n])) })) })}

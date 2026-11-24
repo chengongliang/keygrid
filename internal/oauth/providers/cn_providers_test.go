@@ -101,7 +101,17 @@ func TestIFlowResolveAndRefresh(t *testing.T) {
 func TestQoderBeginAndPoll(t *testing.T) {
 	var pollCount int
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/api/v1/deviceToken/poll") {
+		if r.URL.Path == "/api/v1/userinfo" {
+			if r.Header.Get("Authorization") != "Bearer dt-qoder" || r.Header.Get("User-Agent") != "Go-http-client/2.0" {
+				w.WriteHeader(401)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"username": "qoder-user", "email": "user@example.com", "organization_id": "org-1",
+			})
+			return
+		}
+		if r.URL.Path != "/api/v1/deviceToken/poll" {
 			w.WriteHeader(404)
 			return
 		}
@@ -117,16 +127,17 @@ func TestQoderBeginAndPoll(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"token":      "dt-qoder",
-			"expires_at": float64(time.Now().Add(24 * time.Hour).UnixMilli()),
+			"expires_at": float64(time.Now().Add(5 * time.Minute).UnixMilli()),
 			"user_id":    "u-7",
 			"needs_mill": true,
 		})
 	}))
 	defer up.Close()
 
-	orig := qoderDeviceTokenURL
-	defer func() { qoderDeviceTokenURL = orig }()
+	orig, origUserInfo := qoderDeviceTokenURL, qoderUserInfoURL
+	defer func() { qoderDeviceTokenURL, qoderUserInfoURL = orig, origUserInfo }()
 	qoderDeviceTokenURL = up.URL + "/api/v1/deviceToken/poll"
+	qoderUserInfoURL = up.URL + "/api/v1/userinfo"
 
 	qd := Qoder{}
 	begin, temp, err := qd.BeginAuth(t.Context(), oauth.Callbacks{}, "")
@@ -141,11 +152,14 @@ func TestQoderBeginAndPoll(t *testing.T) {
 	if temp["nonce"] == "" || temp["code_verifier"] == "" || temp["machine_id"] == "" {
 		t.Fatalf("temp must carry nonce/verifier/machineId: %v", temp)
 	}
+	if begin.UserCode != strings.ToUpper(temp["nonce"][:8]) || begin.Interval != 2 || begin.DeviceCodeExpiresIn != 300 {
+		t.Fatalf("device flow shape: %+v", begin)
+	}
 
 	// 第一次 poll 202 → pending
 	if _, err := qd.Resolve(t.Context(), oauth.Callbacks{}, temp); err == nil {
 		t.Fatal("expected pending on 202")
-	} else if !strings.Contains(err.Error(), "pending") && !strings.Contains(err.Error(), "pending") {
+	} else if !strings.Contains(err.Error(), "pending") {
 		t.Fatalf("pending err: %v", err)
 	}
 	tok, err := qd.Resolve(t.Context(), oauth.Callbacks{}, temp)
@@ -155,11 +169,100 @@ func TestQoderBeginAndPoll(t *testing.T) {
 	if tok.AccessToken != "dt-qoder" {
 		t.Fatalf("token: %+v", tok)
 	}
-	if tok.Extra["userId"] != "u-7" || tok.Extra["machineId"] == "" {
+	if tok.Extra["userId"] != "u-7" || tok.Extra["machineId"] == "" ||
+		tok.Extra["displayName"] != "qoder-user" || tok.Extra["email"] != "user@example.com" ||
+		tok.Extra["organizationId"] != "org-1" {
 		t.Fatalf("extra: %+v", tok.Extra)
 	}
-	if tok.ExpiresAt.Before(time.Now()) {
-		t.Fatalf("expires_at parse failed: %v", tok.ExpiresAt)
+	if tok.ExpiresAt.Before(time.Now().Add(23 * time.Hour)) {
+		t.Fatalf("expiry floor failed: %v", tok.ExpiresAt)
+	}
+}
+
+func TestQoderCNBeginAndPollUsesCNEndpointsAndStableIdentity(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/cn/deviceToken/poll":
+			if r.URL.Query().Get("challenge_method") != "S256" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"token": "dt-cn", "user_id": "cn-user-1"})
+		case "/cn/userinfo":
+			if r.Header.Get("Authorization") != "Bearer dt-cn" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"email": " QODER@Example.COM ", "username": "qoder-cn"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer up.Close()
+
+	origDevice, origInfo, origLogin := qoderCNDeviceTokenURL, qoderCNUserInfoURL, qoderCNLoginURL
+	defer func() { qoderCNDeviceTokenURL, qoderCNUserInfoURL, qoderCNLoginURL = origDevice, origInfo, origLogin }()
+	qoderCNDeviceTokenURL = up.URL + "/cn/deviceToken/poll"
+	qoderCNUserInfoURL = up.URL + "/cn/userinfo"
+	qoderCNLoginURL = "https://qoder.com.cn/device/selectAccounts"
+
+	adapter := QoderCN{}
+	begin, temp, err := adapter.BeginAuth(t.Context(), oauth.Callbacks{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adapter.Key() != "qoder-cn" || !strings.Contains(begin.VerificationURIComp, "qoder.com.cn/device") {
+		t.Fatalf("wrong CN flow: key=%q uri=%q", adapter.Key(), begin.VerificationURIComp)
+	}
+	tok, err := adapter.Resolve(t.Context(), oauth.Callbacks{HTTPClient: up.Client()}, temp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.AccessToken != "dt-cn" || tok.Extra["userId"] != "cn-user-1" || tok.Extra["accountIdentity"] != "email:qoder@example.com" {
+		t.Fatalf("unexpected CN token identity: %+v", tok)
+	}
+	if got := qoderAccountIdentity("  ", "cn-user-1"); got != "qoder-user:cn-user-1" {
+		t.Fatalf("fallback account identity = %q", got)
+	}
+}
+
+func TestQoderPollErrorDoesNotExposeResponseBody(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"account disabled","access_token":"secret-value"}`))
+	}))
+	defer up.Close()
+
+	orig := qoderDeviceTokenURL
+	defer func() { qoderDeviceTokenURL = orig }()
+	qoderDeviceTokenURL = up.URL
+	_, err := (Qoder{}).Resolve(t.Context(), oauth.Callbacks{}, map[string]string{
+		"nonce": "nonce", "code_verifier": "verifier",
+	})
+	if err == nil || !strings.Contains(err.Error(), "account disabled") || strings.Contains(err.Error(), "secret-value") {
+		t.Fatalf("expected safe upstream message, got %v", err)
+	}
+}
+
+func TestQoderUserInfoFailureIsBestEffort(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer up.Close()
+
+	orig := qoderUserInfoURL
+	defer func() { qoderUserInfoURL = orig }()
+	qoderUserInfoURL = up.URL
+	if got := qoderFetchUserInfo(t.Context(), oauth.Callbacks{HTTPClient: up.Client()}, "dt-qoder"); got != nil {
+		t.Fatalf("expected no profile on failure, got %+v", got)
+	}
+}
+
+func TestQoderRefreshRequiresReauthorization(t *testing.T) {
+	tok, err := (Qoder{}).Refresh(t.Context(), oauth.Callbacks{}, &oauth.TokenSet{RefreshToken: "rt-qoder"})
+	permanent, code := oauth.ClassifyRefreshError(err)
+	if tok != nil || !permanent || code != "refresh_not_supported" {
+		t.Fatalf("refresh result token=%+v permanent=%v code=%q err=%v", tok, permanent, code, err)
 	}
 }
 

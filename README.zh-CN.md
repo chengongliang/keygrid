@@ -21,7 +21,8 @@
 ## ✨ 功能
 
 - 🔑 **API Key 类渠道**：任意 OpenAI 兼容 base_url（DeepSeek、Kimi openapi、中转站…），粘贴 key 即用
-- 🌐 **OAuth 订阅类渠道**：Kimi（device_code）、OpenAI/Codex（pkce）、Anthropic/Claude、iFlow、Qoder、Trae、CodeBuddy，平台内完成授权 + token 自动刷新（提前 5 分钟）
+- 🌐 **OAuth 订阅类渠道**：Kimi（device_code）、OpenAI/Codex（pkce）、Anthropic/Claude、iFlow、Qoder/Qoder CN、Trae、CodeBuddy；Qoder 支持设备码登录，device token 过期后重新授权
+- 🔐 **Qoder PAT**：Qoder 国际站与中国区均可选择 PAT 预设；平台加密保存 PAT，转发时交换短期 job token、拉取账号模型配置并生成 COSY 签名
 - 📋 **渠道预设**：GLM、DeepSeek、SiliconFlow、火山方舟、千帆、混元、小米 MiMo、MiniMax 等开箱模板（自动填 base_url + 模型目录），添加渠道时可拉取上游模型列表直接勾选
 - 🛡 **出口代理**：管理员在系统设置统一配置（http/https/socks5），用户仅在渠道上勾选是否启用 —— OpenAI 等需代理站点默认勾选；转发、OAuth 授权/刷新、测连、模型拉取全路径生效
 - 🔀 **智能路由**：model_map 映射、priority 优先级、多渠道 failover、渠道级熔断开关（默认关；开启后 30s 内 5 次渠道层失败熔断 30s）
@@ -59,8 +60,8 @@ make web-dev   # 另一个终端: go run .
 
 浏览器打开网关地址（如 `http://gw.company.com`），注册/登录（若公司配置了 OIDC 单点登录，直接点「SSO 登录」）后进入 **我的供应商**：
 
-- **API Key 类**：添加渠道 → 选预设模板（GLM/DeepSeek/硅基流动…自动填 base_url 和模型）或自定义 base_url → 粘贴你的 API Key → 保存 → 点「测连」确认绿灯；也可一键拉取上游模型列表勾选
-- **OAuth 类**（Kimi/Codex/Claude/iFlow/Qoder/Trae/CodeBuddy 订阅）：添加渠道 → 点「授权」→ 跳转/输入 user_code 完成授权 → 状态变 active（token 由平台自动续期，无需再管）
+- **API Key 类**：添加渠道 → 选预设模板（GLM/DeepSeek/硅基流动…自动填 base_url 和模型）或自定义 base_url → 粘贴 API Key → 保存；Qoder PAT 选择对应 Qoder PAT 预设，PAT 由平台加密保存并在转发时换成短期 job token
+- **OAuth 类**（Kimi/Codex/Claude/iFlow/Qoder/Qoder CN/Trae/CodeBuddy 订阅）：添加渠道 → 点「授权」→ 跳转/输入 user_code 完成授权 → 状态变 active；Qoder device token 过期后需重新授权
   - **OpenAI Codex**：需 ChatGPT Plus/Pro 订阅。登录后浏览器会跳转到 `localhost:1455`（页面打不开属预期）——复制地址栏完整 URL 回平台粘贴即可完成授权。上游为 Responses 协议，网关已做 chat/completions ↔ responses 双向转换，照常走 `/v1`。选预设会自动填好上游地址（`https://chatgpt.com/backend-api/codex/responses`，必须指向完整 Responses endpoint）；如需自建/镜像端点，可在编辑渠道时改「上游地址」。
 - **需代理的站点**（如 OpenAI）：添加/编辑渠道时勾选「通过平台代理访问」即可（OpenAI 预设已默认勾选）；代理地址由管理员在系统设置统一配置，用户不可见不可改。未配置代理时该选项不展示。
 

@@ -178,6 +178,12 @@ func (h *ProviderHandler) Create(w http.ResponseWriter, r *http.Request) {
 			resp.BadRequest(w, "api_key required for kind=api_key")
 			return
 		}
+		if req.OAuthProvider != "" {
+			if (req.OAuthProvider != "qoder" && req.OAuthProvider != "qoder-cn") || !strings.HasPrefix(req.APIKey, "pt-") {
+				resp.BadRequest(w, "Qoder PAT channels require oauth_provider=qoder or qoder-cn and a pt- token")
+				return
+			}
+		}
 	case "oauth":
 		if !oauth.IsRegistered(req.OAuthProvider) {
 			resp.BadRequest(w, "unknown oauth_provider ("+strings.Join(sortedOAuthKeys(), "|")+")")
@@ -420,6 +426,17 @@ func (h *ProviderHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if err := resp.Decode(r, &req); err != nil {
 		resp.BadRequest(w, "invalid json body")
 		return
+	}
+	if req.APIKey != nil && *req.APIKey != "" {
+		cur, err := h.Op.GetProvider(userID, id)
+		if err != nil {
+			resp.NotFound(w, "provider not found")
+			return
+		}
+		if relay.IsQoderProvider(cur) && !strings.HasPrefix(*req.APIKey, "pt-") {
+			resp.BadRequest(w, "Qoder PAT channels require a pt- token")
+			return
+		}
 	}
 	// SSRF：与 Create 同防 —— base_url 拒绝私网/环回（防借网关转发探测内网）
 	if req.BaseURL != nil && *req.BaseURL != "" && !isE2EHost(*req.BaseURL) {

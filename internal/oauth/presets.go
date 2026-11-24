@@ -12,16 +12,17 @@ package oauth
 
 // ProviderPreset 单个 provider 的预设模板。
 type ProviderPreset struct {
-	Key         string   `json:"key"`                   // 'glm' | 'deepseek' | ... | oauth 用 adapter key
-	Kind        string   `json:"kind"`                  // 'api_key' | 'oauth'
-	Protocol    string   `json:"protocol"`              // 'openai' | 'anthropic'
-	BaseURL     string   `json:"base_url"`              // chat completions 完整可转发 base（relay 拼 /v1/chat/completions）
-	APIKeyURL   string   `json:"api_key_url,omitempty"` // 去哪申请 key（前端展示用）
-	SignupURL   string   `json:"signup_url,omitempty"`  // OAuth 类注册页
-	Models      []string `json:"models"`                // 内置模型目录
-	DefaultPri  int      `json:"default_priority"`      // 9router priority 对齐，方便多渠道排布
-	AuthMode    string   `json:"auth_mode,omitempty"`   // oauth 附加说明：'oauth+apikey 双模式' 等
-	Description string   `json:"description,omitempty"` // 一句话说明（聚合平台、订阅额度等）
+	Key           string   `json:"key"`                      // 'glm' | 'deepseek' | ... | oauth 用 adapter key
+	Kind          string   `json:"kind"`                     // 'api_key' | 'oauth'
+	OAuthProvider string   `json:"oauth_provider,omitempty"` // api_key 类特殊协议（如 Qoder PAT）使用
+	Protocol      string   `json:"protocol"`                 // 'openai' | 'anthropic'
+	BaseURL       string   `json:"base_url"`                 // chat completions 完整可转发 base（relay 拼 /v1/chat/completions）
+	APIKeyURL     string   `json:"api_key_url,omitempty"`    // 去哪申请 key（前端展示用）
+	SignupURL     string   `json:"signup_url,omitempty"`     // OAuth 类注册页
+	Models        []string `json:"models"`                   // 内置模型目录
+	DefaultPri    int      `json:"default_priority"`         // 9router priority 对齐，方便多渠道排布
+	AuthMode      string   `json:"auth_mode,omitempty"`      // oauth 附加说明：'oauth+apikey 双模式' 等
+	Description   string   `json:"description,omitempty"`    // 一句话说明（聚合平台、订阅额度等）
 	// NeedsProxy 该站点通常需代理才能访问（如 OpenAI）。前端选预设时默认勾选
 	// 「通过平台代理访问」；后端创建时未显式传 use_proxy 也按此默认。
 	NeedsProxy bool `json:"needs_proxy,omitempty"`
@@ -133,9 +134,35 @@ var providerPresets = []ProviderPreset{
 		Key: "qoder", Kind: "oauth", Protocol: "openai",
 		BaseURL:     "https://api3.qoder.sh",
 		SignupURL:   "https://qoder.com",
-		Models:      []string{"ultimate", "auto", "performance", "efficient", "qmodel_preview", "qmodel_latest", "kmodel_latest", "gm51model", "dmodel", "dfmodel"},
+		Models:      []string{"ultimate", "auto", "performance", "efficient", "lite", "qmodel_38max", "qmodel_latest", "qmodel", "qfmodel", "kmodel_latest", "kmodel", "gmodel", "gfmodel", "dmodel", "dfmodel", "mmodel", "smodel", "cmodel"},
 		AuthMode:    "device_token 轮询（本地 PKCE+nonce+machine_id）；也支持 PAT (pt-…)",
 		Description: "Qoder（阿里系 IDE 订阅）",
+	},
+	{
+		Key: "qoder-cn", Kind: "oauth", Protocol: "openai",
+		BaseURL:     "https://gateway.qoder.com.cn",
+		SignupURL:   "https://qoder.com.cn",
+		Models:      []string{"ultimate", "auto", "performance", "efficient", "lite", "qmodel_38max", "qmodel_latest", "qmodel", "qfmodel", "kmodel_latest", "kmodel", "gmodel", "gfmodel", "dmodel", "dfmodel", "mmodel"},
+		AuthMode:    "device_token 轮询（中国区）；也支持 PAT (pt-…)",
+		Description: "Qoder CN（中国区 IDE 订阅）",
+	},
+	{
+		Key: "qoder-pat", Kind: "api_key", OAuthProvider: "qoder", Protocol: "openai",
+		BaseURL:     "https://api3.qoder.sh",
+		APIKeyURL:   "https://qoder.com/account/integrations",
+		Models:      []string{"ultimate", "auto", "performance", "efficient", "lite", "qmodel_38max", "qmodel_latest", "qmodel", "qfmodel", "kmodel_latest", "kmodel", "gmodel", "gfmodel", "dmodel", "dfmodel", "mmodel", "smodel", "cmodel"},
+		DefaultPri:  30,
+		AuthMode:    "Qoder PAT (pt-…)，经平台交换为 job token 并使用 COSY 签名",
+		Description: "Qoder 国际站个人访问令牌",
+	},
+	{
+		Key: "qoder-cn-pat", Kind: "api_key", OAuthProvider: "qoder-cn", Protocol: "openai",
+		BaseURL:     "https://gateway.qoder.com.cn",
+		APIKeyURL:   "https://qoder.com.cn/account/integrations",
+		Models:      []string{"ultimate", "auto", "performance", "efficient", "lite", "qmodel_38max", "qmodel_latest", "qmodel", "qfmodel", "kmodel_latest", "kmodel", "gmodel", "gfmodel", "dmodel", "dfmodel", "mmodel"},
+		DefaultPri:  30,
+		AuthMode:    "Qoder CN PAT (pt-…)，经平台交换为 job token 并使用 COSY 签名",
+		Description: "Qoder 中国区个人访问令牌",
 	},
 	{
 		Key: "trae", Kind: "oauth", Protocol: "openai",

@@ -2,6 +2,7 @@ package relay
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +10,27 @@ import (
 
 	"github.com/chengongliang/keygrid/internal/model"
 )
+
+func TestUpstreamCallXAISSEContextError(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: " + `{"type":"response.failed","response":{"error":{"message":"Input too long","code":"context_length_exceeded"}}}` + "\n\n"))
+	}))
+	defer up.Close()
+
+	h := NewHandler(nil)
+	for _, stream := range []bool{false, true} {
+		w := httptest.NewRecorder()
+		status, _, err := h.upstreamCallXAI(t.Context(), h.HTTPClient, up.URL, "tok", []byte(`{"model":"grok","input":"hi"}`), stream, protoResponses, w, "", "")
+		var ue *UpstreamError
+		if status != 400 || !errors.As(err, &ue) || channelFailure(err, status) || w.Body.Len() != 0 {
+			t.Fatalf("stream=%v: status=%d err=%v body=%s", stream, status, err, w.Body.String())
+		}
+		if !strings.Contains(ue.Body, "context_length_exceeded") {
+			t.Fatalf("xAI 上游错误码丢失: %s", ue.Body)
+		}
+	}
+}
 
 func TestXAIProviderAndBaseURL(t *testing.T) {
 	if !IsXAIProvider(&model.Provider{Kind: "oauth", OAuthProvider: "xai"}) {
