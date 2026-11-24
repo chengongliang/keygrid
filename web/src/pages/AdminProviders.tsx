@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { RefreshCw, RotateCcw } from 'lucide-react'
-import { fmtCompact } from '@/components/usage-charts'
+import { fmtCompact, Pagination } from '@/components/usage-charts'
 import { ProviderErrorsPanel } from '@/components/provider-errors'
 import { api, type ProviderHealthRow } from '@/lib/api'
 
@@ -21,7 +21,10 @@ export default function AdminProviders() {
   const [err, setErr] = useState('')
   const [msg, setMsg] = useState('')
   const [loading, setLoading] = useState(true)
+  const [search, setSearch] = useState('')
   const [onlyAbnormal, setOnlyAbnormal] = useState(false)
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(20)
   const [busyId, setBusyId] = useState(0)
   // 展开的行 = 查看该渠道的最近失败详情（同一时刻只展开一个，避免表格跳动）
   const [expanded, setExpanded] = useState(0)
@@ -55,9 +58,16 @@ export default function AdminProviders() {
   }
 
   // 仅看异常 = 熔断中/半开，或近 24h 有失败（与「24h 失败」列同一口径，含 4xx/5xx）
-  const visible = onlyAbnormal
-    ? rows.filter((r) => (r.breaker_check && r.breaker_state && r.breaker_state !== 'closed') || r.fail_24h > 0)
-    : rows
+  const query = search.trim().toLowerCase()
+  const visible = rows.filter((r) => {
+    const abnormal = (r.breaker_check && r.breaker_state && r.breaker_state !== 'closed') || r.fail_24h > 0
+    const matches = !query || String(r.id).includes(query)
+      || r.name.toLowerCase().includes(query) || r.user_email.toLowerCase().includes(query)
+    return (!onlyAbnormal || abnormal) && matches
+  })
+  const currentPage = Math.min(page, Math.max(0, Math.ceil(visible.length / pageSize) - 1))
+  const pagedRows = visible.slice(currentPage * pageSize, (currentPage + 1) * pageSize)
+  useEffect(() => { setPage(currentPage) }, [currentPage])
 
   return (
     <div>
@@ -68,7 +78,7 @@ export default function AdminProviders() {
             className="flex cursor-pointer items-center gap-2 text-sm text-muted"
             title={t('adminProviders.onlyAbnormalHint')}
           >
-            <input type="checkbox" checked={onlyAbnormal} onChange={(e) => setOnlyAbnormal(e.target.checked)} />
+            <input type="checkbox" checked={onlyAbnormal} onChange={(e) => { setOnlyAbnormal(e.target.checked); setPage(0); setExpanded(0) }} />
             {t('adminProviders.onlyAbnormal')}
           </label>
           <button className="btn-ghost flex items-center gap-1.5" onClick={load} disabled={loading}>
@@ -78,6 +88,14 @@ export default function AdminProviders() {
         </div>
       </div>
       <p className="mb-4 text-xs text-muted">{t('adminProviders.desc')}</p>
+      <input
+        type="search"
+        className="input-sm mb-3 w-full sm:max-w-sm"
+        aria-label={t('adminProviders.searchPlaceholder')}
+        placeholder={t('adminProviders.searchPlaceholder')}
+        value={search}
+        onChange={(e) => { setSearch(e.target.value); setPage(0); setExpanded(0) }}
+      />
 
       {err && <div className="mb-3 rounded-lg px-3 py-2 text-sm text-red-600 dark:text-red-400 err-well">{err}</div>}
       {msg && <div className="mb-3 w-fit rounded-lg px-3 py-2 text-sm badge-green">{msg}</div>}
@@ -95,11 +113,11 @@ export default function AdminProviders() {
               <th className="px-4 py-3">{t('adminProviders.colFail24h')}</th>
               <th className="px-4 py-3">{t('adminProviders.colSuccessRate')}</th>
               <th className="px-4 py-3">{t('adminProviders.colLatency')}</th>
-              <th className="sticky-col px-4 py-3">{t('common.actions')}</th>
+              <th className="sticky-col px-4 py-3" style={{ boxShadow: 'none' }}>{t('common.actions')}</th>
             </tr>
           </thead>
           <tbody>
-            {visible.map((r) => {
+            {pagedRows.map((r) => {
               const bs = BREAKER_STYLE[r.breaker_state]
               const abnormal = r.breaker_check && !!bs && r.breaker_state !== 'closed'
               return (
@@ -151,7 +169,7 @@ export default function AdminProviders() {
                   {/* 操作列：sticky 固定右缘，横向滚动时按钮始终可见。
                       重置熔断常显，未开启检测 / 未熔断时禁用（tooltip 由外层 span 承载，
                       disabled 按钮自身不触发 hover），只有熔断中才可点。 */}
-                  <td className="sticky-col px-4 py-2.5" onClick={(e) => e.stopPropagation()}>
+                  <td className="sticky-col px-4 py-2.5" style={{ boxShadow: 'none' }} onClick={(e) => e.stopPropagation()}>
                     <span
                       className="inline-flex"
                       title={
@@ -164,6 +182,7 @@ export default function AdminProviders() {
                     >
                       <button
                         className="btn-icon"
+                        aria-label={t('adminProviders.resetBreaker')}
                         disabled={busyId === r.id || !abnormal}
                         onClick={() => resetBreaker(r)}
                       >
@@ -189,10 +208,12 @@ export default function AdminProviders() {
         </table>
       </div>
 
-      <div className="mt-3 flex items-center justify-between text-sm text-muted">
-        <span>{t('adminProviders.total', { total: visible.length })}</span>
-        {loading && <span className="text-xs opacity-70">{t('common.loading')}</span>}
-      </div>
+      <Pagination className="mt-3"
+        total={visible.length} page={currentPage} pageSize={pageSize}
+        onPage={(p) => { setPage(p); setExpanded(0) }}
+        onPageSize={(n) => { setPageSize(n); setPage(0); setExpanded(0) }}
+      />
+      {loading && <div className="mt-2 text-xs text-muted opacity-70">{t('common.loading')}</div>}
     </div>
   )
 }

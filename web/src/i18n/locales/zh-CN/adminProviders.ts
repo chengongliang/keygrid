@@ -5,6 +5,7 @@ const adminProviders = {
   desc: '熔断按渠道统计，且需要在渠道里单独开启（默认为关，适合只有一条不稳定渠道的场景）：只有 5xx、限流（429）、连接/超时/断流这类渠道或网络层故障才计入，参数错误等 4xx 不计入。默认 30 秒内失败 5 次熔断 30 秒，之后自动半开试探，也可手动重置。',
   onlyAbnormal: '仅看异常',
   onlyAbnormalHint: '只显示熔断中 / 半开试探的渠道，或近 24h 有失败的渠道',
+  searchPlaceholder: '搜索渠道 ID / 名称 / 用户邮箱',
   colUser: '用户',
   colChannel: '渠道',
   colCred: '凭据',
@@ -24,7 +25,7 @@ const adminProviders = {
   resetBreaker: '重置熔断',
   resetDone: '已重置 {{name}} 的熔断状态',
   resetFailed: '重置失败',
-  empty: '没有匹配的渠道',
+  empty: '没有匹配的渠道，请尝试其他关键词或调整筛选条件',
   total: '共 {{total}} 条渠道',
 }
 
